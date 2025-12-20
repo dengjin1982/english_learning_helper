@@ -1,0 +1,39 @@
+# Environment variables (contains API keys) - DO NOT COMMIT
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Output files (generated learning materials)
+vocabulary_learning_materials*.txt
+*_learning_materials*.txt
+my_vocab_*.txt
+
+# User data (tracking cache)
+processed_words.json
+
+# Test output files
+test_*.txt
+*_test*.txt
+sample_vocabulary*.txt
+demo_*.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
