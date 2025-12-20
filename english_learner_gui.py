@@ -547,7 +547,12 @@ class FindDialog(QDialog):
         # Clear any previous find highlights and set new one
         current_selections = self.text_editor.extraSelections()
         # Keep only non-find highlights (if any), add find highlight
-        find_selections = [s for s in current_selections if s.format.background().name() != "#ffeb3b"]
+        # Check background color by converting QBrush to QColor
+        find_selections = []
+        for s in current_selections:
+            bg_color = s.format.background().color()
+            if bg_color.name() != "#ffeb3b":  # Not a find highlight (yellow)
+                find_selections.append(s)
         find_selections.append(extra_selection)
         self.text_editor.setExtraSelections(find_selections)
         
@@ -560,7 +565,12 @@ class FindDialog(QDialog):
             return
         current_selections = self.text_editor.extraSelections()
         # Remove only find highlights (yellow background)
-        remaining = [s for s in current_selections if s.format.background().name() != "#ffeb3b"]
+        # Check background color by converting QBrush to QColor
+        remaining = []
+        for s in current_selections:
+            bg_color = s.format.background().color()
+            if bg_color.name() != "#ffeb3b":  # Not a find highlight (yellow)
+                remaining.append(s)
         self.text_editor.setExtraSelections(remaining)
     
     def showEvent(self, event):
