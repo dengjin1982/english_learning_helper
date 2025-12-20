@@ -8,16 +8,17 @@ import os
 import sys
 import re
 import random
+import math
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QFileDialog, QMessageBox,
     QGroupBox, QGridLayout, QSpinBox, QCheckBox, QStatusBar, QProgressBar,
     QSplitter, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QTabWidget
+    QTabWidget, QDialog, QShortcut
 )
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QSyntaxHighlighter, QTextCursor
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QSize
+from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QSyntaxHighlighter, QTextCursor, QKeySequence, QIcon, QPixmap, QPainter, QPen, QBrush
 from PyQt5.QtWidgets import QTextEdit
 
 # Import the core functionality
@@ -216,7 +217,7 @@ class ProcessingThread(QThread):
         self.progress.emit(f"Saving results to: {self.output_file}")
         self._save_results_to_file(
             self.output_file, word_data, all_tests, test_batches,
-            total_words, new_words, duplicate_words
+            total_words, new_words, duplicate_words, words_to_process
         )
         
         # Update tracker
@@ -235,9 +236,14 @@ class ProcessingThread(QThread):
         }
     
     def _save_results_to_file(self, output_path, word_data, all_tests, test_batches,
-                              total_words, new_words, duplicate_words):
+                              total_words, new_words, duplicate_words, words_to_process):
         """Save results to file."""
-        word_list = list(word_data.items())
+        # Preserve original file order - create word list in the same order as words_to_process
+        word_list = []
+        for word in words_to_process:
+            if word in word_data:  # Only include words that were successfully processed
+                word_list.append((word, word_data[word]))
+        
         word_sections = []
         for i in range(0, len(word_list), self.words_per_section):
             word_sections.append(word_list[i:i + self.words_per_section])
@@ -330,6 +336,248 @@ class ProcessingThread(QThread):
                         f.write("\n" + "=" * 80 + "\n\n\n")
 
 
+class FindDialog(QDialog):
+    """Find dialog for searching text in results."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Find")
+        self.setModal(False)  # Non-modal so user can still interact with main window
+        self.setFixedSize(450, 140)
+        
+        # Style the dialog to match dark theme
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+            }
+            QLabel {
+                color: #d4d4d4;
+            }
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e3e;
+                padding: 4px;
+            }
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QPushButton:pressed {
+                background-color: #0a4d75;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Search input
+        input_layout = QHBoxLayout()
+        input_layout.addWidget(QLabel("Find:"))
+        self.find_input = QLineEdit()
+        self.find_input.setPlaceholderText("Enter search text...")
+        self.find_input.textChanged.connect(self.on_text_changed)
+        self.find_input.returnPressed.connect(self.find_next)
+        input_layout.addWidget(self.find_input)
+        layout.addLayout(input_layout)
+        
+        # Status label
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #888; font-size: 9pt;")
+        layout.addWidget(self.status_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.find_next_btn = QPushButton("Find Next")
+        self.find_next_btn.clicked.connect(self.find_next)
+        self.find_prev_btn = QPushButton("Find Previous")
+        self.find_prev_btn.clicked.connect(self.find_previous)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        
+        button_layout.addWidget(self.find_next_btn)
+        button_layout.addWidget(self.find_prev_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(self.close_btn)
+        layout.addLayout(button_layout)
+        
+        # Store reference to text editor
+        self.text_editor = None
+        self.last_search_text = ""
+        self.last_position = 0
+    
+    def on_text_changed(self, text):
+        """Handle text change in find input."""
+        # Clear status when text changes
+        self.status_label.setText("")
+    
+    def set_text_editor(self, text_editor):
+        """Set the text editor to search in."""
+        self.text_editor = text_editor
+    
+    def find_next(self):
+        """Find next occurrence (case-insensitive)."""
+        if not self.text_editor:
+            return
+        
+        search_text = self.find_input.text()
+        if not search_text:
+            return
+        
+        # Get current cursor position
+        cursor = self.text_editor.textCursor()
+        start_pos = cursor.position()
+        
+        # Search forward from current position (case-insensitive)
+        text = self.text_editor.toPlainText()
+        text_lower = text.lower()
+        search_lower = search_text.lower()
+        
+        found_pos = text_lower.find(search_lower, start_pos)
+        
+        if found_pos == -1:
+            # Wrap around - search from beginning
+            found_pos = text_lower.find(search_lower, 0)
+            if found_pos == -1:
+                # Not found anywhere
+                self.status_label.setText("Not found")
+                QMessageBox.information(self, "Find", f"'{search_text}' not found.")
+                return
+        
+        if found_pos != -1:
+            # Move cursor to found position
+            cursor.setPosition(found_pos)
+            cursor.setPosition(found_pos + len(search_text), QTextCursor.KeepAnchor)
+            self.text_editor.setTextCursor(cursor)
+            self.text_editor.ensureCursorVisible()
+            
+            # Highlight the found text
+            self.highlight_found_text(found_pos, len(search_text))
+            
+            # Update status - count total occurrences
+            total_count = text_lower.count(search_lower)
+            current_num = text_lower[:found_pos].count(search_lower) + 1
+            self.status_label.setText(f"Found {current_num} of {total_count}")
+            
+            # Keep dialog on top
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.status_label.setText("Not found")
+    
+    def find_previous(self):
+        """Find previous occurrence (case-insensitive)."""
+        if not self.text_editor:
+            return
+        
+        search_text = self.find_input.text()
+        if not search_text:
+            return
+        
+        # Get current cursor position
+        cursor = self.text_editor.textCursor()
+        start_pos = cursor.position() - 1
+        
+        # Search backward from current position (case-insensitive)
+        text = self.text_editor.toPlainText()
+        text_lower = text.lower()
+        search_lower = search_text.lower()
+        
+        # Search backward up to start_pos
+        found_pos = text_lower.rfind(search_lower, 0, max(0, start_pos))
+        
+        if found_pos == -1:
+            # Wrap around - search from end
+            found_pos = text_lower.rfind(search_lower)
+            if found_pos == -1:
+                # Not found anywhere
+                self.status_label.setText("Not found")
+                QMessageBox.information(self, "Find", f"'{search_text}' not found.")
+                return
+        
+        if found_pos != -1:
+            # Move cursor to found position
+            cursor.setPosition(found_pos)
+            cursor.setPosition(found_pos + len(search_text), QTextCursor.KeepAnchor)
+            self.text_editor.setTextCursor(cursor)
+            self.text_editor.ensureCursorVisible()
+            
+            # Highlight the found text
+            self.highlight_found_text(found_pos, len(search_text))
+            
+            # Update status - count total occurrences
+            total_count = text_lower.count(search_lower)
+            current_num = text_lower[:found_pos].count(search_lower) + 1
+            self.status_label.setText(f"Found {current_num} of {total_count}")
+            
+            # Keep dialog on top
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.status_label.setText("Not found")
+    
+    def highlight_found_text(self, position, length):
+        """Highlight the found text."""
+        if not self.text_editor:
+            return
+        
+        cursor = self.text_editor.textCursor()
+        cursor.setPosition(position)
+        cursor.setPosition(position + length, QTextCursor.KeepAnchor)
+        
+        # Create highlight format (bright yellow for find results)
+        highlight_format = QTextCharFormat()
+        highlight_format.setBackground(QColor("#ffeb3b"))  # Bright yellow background
+        highlight_format.setForeground(QColor("#000000"))  # Black text
+        highlight_format.setFontWeight(QFont.Bold)
+        
+        # Apply highlight using ExtraSelection
+        extra_selection = QTextEdit.ExtraSelection()
+        extra_selection.cursor = cursor
+        extra_selection.format = highlight_format
+        
+        # Clear any previous find highlights and set new one
+        current_selections = self.text_editor.extraSelections()
+        # Keep only non-find highlights (if any), add find highlight
+        find_selections = [s for s in current_selections if s.format.background().name() != "#ffeb3b"]
+        find_selections.append(extra_selection)
+        self.text_editor.setExtraSelections(find_selections)
+        
+        # Clear highlight after 3 seconds
+        QTimer.singleShot(3000, lambda: self.clear_find_highlight())
+    
+    def clear_find_highlight(self):
+        """Clear find highlights."""
+        if not self.text_editor:
+            return
+        current_selections = self.text_editor.extraSelections()
+        # Remove only find highlights (yellow background)
+        remaining = [s for s in current_selections if s.format.background().name() != "#ffeb3b"]
+        self.text_editor.setExtraSelections(remaining)
+    
+    def showEvent(self, event):
+        """Focus the input when dialog is shown."""
+        super().showEvent(event)
+        self.find_input.setFocus()
+        if self.find_input.text():
+            self.find_input.selectAll()
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard events."""
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
 class EnglishLearnerGUI(QMainWindow):
     """Main GUI application window."""
     
@@ -350,13 +598,181 @@ class EnglishLearnerGUI(QMainWindow):
         self.highlight_timer.setSingleShot(True)
         self.highlight_timer.timeout.connect(self.clear_highlight)
         
+        # Find dialog
+        self.find_dialog = None
+        
         # Setup UI
         self.setup_ui()
+        
+        # Set window icon
+        self.setWindowIcon(self.create_app_icon())
         
         # Timer to update current position indicator
         self.position_timer = QTimer()
         self.position_timer.timeout.connect(self.update_current_position)
         self.position_timer.start(500)  # Update every 500ms
+        
+        # Setup keyboard shortcuts
+        self.setup_shortcuts()
+    
+    def create_app_icon(self):
+        """Create a fancy icon for the application - a book with a lightbulb representing learning."""
+        # Create icon with multiple sizes for different uses
+        icon = QIcon()
+        
+        # Create sizes: 16x16, 32x32, 48x48, 64x64, 128x128, 256x256
+        sizes = [16, 32, 48, 64, 128, 256]
+        
+        for size in sizes:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.transparent)
+            
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            center = size // 2
+            pen_width = max(1, size // 32)
+            
+            # Draw background circle with gradient effect
+            radius = int(size * 0.45)
+            
+            # Outer circle - deep blue
+            painter.setBrush(QBrush(QColor("#0e639c")))
+            painter.setPen(QPen(QColor("#0a4d75"), pen_width))
+            painter.drawEllipse(center - radius, center - radius, radius * 2, radius * 2)
+            
+            # Inner highlight - lighter blue
+            inner_radius = int(radius * 0.75)
+            painter.setBrush(QBrush(QColor("#1177bb")))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(center - inner_radius, center - inner_radius, inner_radius * 2, inner_radius * 2)
+            
+            # Draw open book
+            book_width = int(size * 0.55)
+            book_height = int(size * 0.4)
+            book_x = center - book_width // 2
+            book_y = center - book_height // 2 + int(size * 0.08)
+            
+            # Left page
+            left_page_width = int(book_width * 0.48)
+            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.setPen(QPen(QColor("#d0d0d0"), pen_width))
+            painter.drawRoundedRect(book_x, book_y, left_page_width, book_height, 3, 3)
+            
+            # Right page
+            right_page_x = book_x + left_page_width + int(size * 0.02)
+            right_page_width = int(book_width * 0.48)
+            painter.drawRoundedRect(right_page_x, book_y, right_page_width, book_height, 3, 3)
+            
+            # Book spine/binding
+            spine_x = book_x + left_page_width - 1
+            spine_width = int(size * 0.03)
+            painter.setBrush(QBrush(QColor("#4a90e2")))
+            painter.setPen(Qt.NoPen)
+            painter.drawRect(spine_x, book_y, spine_width, book_height)
+            
+            # Draw text lines on pages
+            line_y_start = book_y + int(book_height * 0.2)
+            line_spacing = int(book_height * 0.18)
+            painter.setPen(QPen(QColor("#6ba3e3"), max(1, size // 40)))
+            
+            # Lines on left page
+            for i in range(3):
+                y = line_y_start + i * line_spacing
+                line_start = book_x + int(size * 0.05)
+                line_end = book_x + left_page_width - int(size * 0.05)
+                painter.drawLine(line_start, y, line_end, y)
+            
+            # Lines on right page
+            for i in range(3):
+                y = line_y_start + i * line_spacing
+                line_start = right_page_x + int(size * 0.05)
+                line_end = right_page_x + right_page_width - int(size * 0.05)
+                painter.drawLine(line_start, y, line_end, y)
+            
+            # Draw lightbulb above book (represents learning/insight)
+            bulb_size = int(size * 0.25)
+            bulb_x = center
+            bulb_y = center - int(size * 0.3)
+            
+            # Lightbulb body (yellow/gold)
+            bulb_radius = bulb_size // 2
+            painter.setBrush(QBrush(QColor("#ffd700")))
+            painter.setPen(QPen(QColor("#ffa500"), pen_width))
+            painter.drawEllipse(bulb_x - bulb_radius, bulb_y - bulb_radius, bulb_radius * 2, bulb_radius * 2)
+            
+            # Lightbulb base (darker)
+            base_width = int(bulb_size * 0.4)
+            base_height = int(bulb_size * 0.3)
+            base_x = bulb_x - base_width // 2
+            base_y = bulb_y + bulb_radius - int(base_height * 0.3)
+            painter.setBrush(QBrush(QColor("#ffa500")))
+            painter.setPen(QPen(QColor("#cc8500"), pen_width))
+            painter.drawRoundedRect(base_x, base_y, base_width, base_height, 2, 2)
+            
+            # Light rays (sparkles)
+            ray_length = int(bulb_size * 0.3)
+            painter.setPen(QPen(QColor("#ffd700"), max(1, size // 48)))
+            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+                rad = math.radians(angle)
+                start_x = bulb_x + int(bulb_radius * 0.7 * math.cos(rad))
+                start_y = bulb_y + int(bulb_radius * 0.7 * math.sin(rad))
+                end_x = bulb_x + int((bulb_radius + ray_length) * math.cos(rad))
+                end_y = bulb_y + int((bulb_radius + ray_length) * math.sin(rad))
+                painter.drawLine(start_x, start_y, end_x, end_y)
+            
+            painter.end()
+            
+            # Add pixmap to icon
+            icon.addPixmap(pixmap)
+        
+        # Optionally save icon to file (for Windows .ico file)
+        # Uncomment the following lines if you want to save the icon
+        # self.save_icon_to_file(icon)
+        
+        return icon
+    
+    def save_icon_to_file(self, icon, filename="app_icon.ico"):
+        """Save the icon to an ICO file (optional)."""
+        # Get the largest pixmap (256x256)
+        pixmap = icon.pixmap(256, 256)
+        if pixmap:
+            pixmap.save(filename, "ICO")
+            print(f"Icon saved to {filename}")
+    
+    def setup_shortcuts(self):
+        """Setup keyboard shortcuts."""
+        # Ctrl+F for find
+        find_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
+        find_shortcut.activated.connect(self.show_find_dialog)
+        
+        # F3 for find next (when find dialog is open)
+        find_next_shortcut = QShortcut(QKeySequence("F3"), self)
+        find_next_shortcut.activated.connect(self.find_next_from_dialog)
+        
+        # Shift+F3 for find previous
+        find_prev_shortcut = QShortcut(QKeySequence("Shift+F3"), self)
+        find_prev_shortcut.activated.connect(self.find_previous_from_dialog)
+    
+    def show_find_dialog(self):
+        """Show the find dialog."""
+        if self.find_dialog is None:
+            self.find_dialog = FindDialog(self)
+            self.find_dialog.set_text_editor(self.results_text)
+        
+        self.find_dialog.show()
+        self.find_dialog.raise_()
+        self.find_dialog.activateWindow()
+    
+    def find_next_from_dialog(self):
+        """Find next from dialog (F3 shortcut)."""
+        if self.find_dialog and self.find_dialog.isVisible():
+            self.find_dialog.find_next()
+    
+    def find_previous_from_dialog(self):
+        """Find previous from dialog (Shift+F3 shortcut)."""
+        if self.find_dialog and self.find_dialog.isVisible():
+            self.find_dialog.find_previous()
         
     def setup_ui(self):
         """Set up the user interface."""

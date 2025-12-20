@@ -1704,8 +1704,13 @@ def process(file_paths: tuple, examples_per_word: int, output: Optional[str], te
             output = f"{name}_{timestamp}{ext}"
             output = os.path.join(os.getcwd(), output)
 
-        # Group words into sections
-        word_list = list(word_data.items())
+        # Group words into sections - preserve original file order
+        # Create word list in the same order as words_to_process (original file order)
+        word_list = []
+        for word in words_to_process:
+            if word in word_data:  # Only include words that were successfully processed
+                word_list.append((word, word_data[word]))
+        
         word_sections = []
         for i in range(0, len(word_list), words_per_section):
             word_sections.append(word_list[i:i + words_per_section])
