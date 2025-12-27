@@ -17,13 +17,15 @@ from PyQt5.QtWidgets import (
     QSplitter, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
     QTabWidget, QDialog, QShortcut
 )
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QSize
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QSize, QDir, QSortFilterProxyModel, QModelIndex
+from PyQt5.QtWidgets import QFileSystemModel, QListView, QTreeView
 from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QSyntaxHighlighter, QTextCursor, QKeySequence, QIcon, QPixmap, QPainter, QPen, QBrush
 from PyQt5.QtWidgets import QTextEdit
 
 # Import the core functionality
 from english_learner import (
-    VocabularyLoader, SentenceGenerator, FillInBlankGenerator, WordTracker
+    VocabularyLoader, SentenceGenerator, FillInBlankGenerator, WordTracker,
+    process_vocabulary_files, check_new_words_and_process, clear_word_tracker
 )
 
 
@@ -80,6 +82,126 @@ class SyntaxHighlighter(QSyntaxHighlighter):
                 self.setFormat(start, end - start, format)
 
 
+class FileFirstSortProxy(QSortFilterProxyModel):
+    """Proxy model that sorts files before directories."""
+    
+    def _is_directory(self, source_model, source_index):
+        """Check if an item is a directory, handling different model types."""
+        # Check if it's a QFileSystemModel
+        if isinstance(source_model, QFileSystemModel):
+            return source_model.isDir(source_index)
+        
+        # For other models, try to get file info from the index
+        # QFileDialog uses QFileSystemModel internally, but might wrap it
+        # Try to get the file path and check if it's a directory
+        try:
+            file_path = source_model.filePath(source_index) if hasattr(source_model, 'filePath') else None
+            if file_path:
+                return os.path.isdir(file_path)
+        except:
+            pass
+        
+        # Fallback: check if the item has children (directories often do)
+        # This is not perfect but better than crashing
+        return source_model.hasChildren(source_index)
+    
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        """Sort files before directories, then alphabetically."""
+        source_model = self.sourceModel()
+        if not source_model:
+            return False
+        
+        # Validate indices belong to this proxy model
+        if not left.isValid() or not right.isValid():
+            return False
+        
+        if left.model() != self or right.model() != self:
+            return False
+        
+        try:
+            left_source = self.mapToSource(left)
+            right_source = self.mapToSource(right)
+            
+            if not left_source.isValid() or not right_source.isValid():
+                return False
+            
+            left_is_dir = self._is_directory(source_model, left_source)
+            right_is_dir = self._is_directory(source_model, right_source)
+            
+            # Files come before directories
+            if left_is_dir != right_is_dir:
+                # If left is file and right is dir, left comes first (return True)
+                # If left is dir and right is file, right comes first (return False)
+                return not left_is_dir
+            
+            # Both are files or both are directories - get data from source model
+            left_data = source_model.data(left_source, Qt.DisplayRole) if isinstance(source_model, QFileSystemModel) else left.data()
+            right_data = source_model.data(right_source, Qt.DisplayRole) if isinstance(source_model, QFileSystemModel) else right.data()
+            
+            if not left_data or not right_data:
+                return False
+            
+            left_str = str(left_data).lower()
+            right_str = str(right_data).lower()
+            
+            # If both are files, prioritize .html and .txt files
+            if not left_is_dir and not right_is_dir:
+                left_is_html_txt = left_str.endswith(('.html', '.htm', '.txt'))
+                right_is_html_txt = right_str.endswith(('.html', '.htm', '.txt'))
+                
+                if left_is_html_txt != right_is_html_txt:
+                    return left_is_html_txt  # .html/.txt files come first
+            
+            # Both same type, sort alphabetically
+            return left_str < right_str
+        except Exception:
+            # If anything fails, fall back to alphabetical sorting using proxy data
+            try:
+                left_data = left.data()
+                right_data = right.data()
+                if left_data and right_data:
+                    return str(left_data).lower() < str(right_data).lower()
+            except:
+                pass
+        
+        return False
+
+
+class CheckNewThread(QThread):
+    """Thread for checking new words and generating materials without blocking UI."""
+    
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    
+    def __init__(self, input_files, output_file, examples_per_word, test_batch_size,
+                 words_per_section, tracker_file):
+        super().__init__()
+        self.input_files = input_files if isinstance(input_files, list) else [input_files]
+        self.output_file = output_file
+        self.examples_per_word = examples_per_word
+        self.test_batch_size = test_batch_size
+        self.words_per_section = words_per_section
+        self.tracker_file = tracker_file
+    
+    def run(self):
+        """Run the check-new processing in background thread."""
+        try:
+            result = check_new_words_and_process(
+                file_paths=self.input_files,
+                tracker_file=self.tracker_file,
+                output=self.output_file,
+                examples_per_word=self.examples_per_word,
+                test_batch_size=self.test_batch_size,
+                words_per_section=self.words_per_section,
+                progress_callback=self.progress.emit  # Use GUI progress signal
+            )
+            self.finished.emit(result)
+        except Exception as e:
+            import traceback
+            self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
+
+
 class ProcessingThread(QThread):
     """Thread for processing vocabulary file without blocking UI."""
     
@@ -97,7 +219,7 @@ class ProcessingThread(QThread):
         self.words_per_section = words_per_section
         self.track_new_words = track_new_words
         self.tracker_file = tracker_file
-        
+    
     def run(self):
         """Run the processing in background thread."""
         try:
@@ -108,232 +230,31 @@ class ProcessingThread(QThread):
             self.error.emit(f"{str(e)}\n\n{traceback.format_exc()}")
     
     def _process_files(self):
-        """Process one or more vocabulary files."""
-        if len(self.input_files) > 1:
-            self.progress.emit(f"Loading {len(self.input_files)} vocabulary files...")
-        else:
-            self.progress.emit("Loading vocabulary file...")
-        
-        loader = VocabularyLoader()
-        all_words = []
-        
-        # Helper function to find file with extensions
-        def find_file(file_path):
-            import os
-            if os.path.exists(file_path):
-                return file_path
-            extensions = ['', '.html', '.htm', '.txt', '.md']
-            for ext in extensions:
-                test_path = file_path + ext
-                if os.path.exists(test_path):
-                    return test_path
-            return None
-        
-        # Load words from all files
-        for input_file in self.input_files:
-            actual_path = find_file(input_file)
-            if not actual_path:
-                raise Exception(f"File not found: {input_file}")
-            
-            words_from_file = loader.load_file(actual_path)
-            all_words.extend(words_from_file)
-            if len(self.input_files) > 1:
-                self.progress.emit(f"Loaded {len(words_from_file)} words from {os.path.basename(actual_path)}")
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_words = []
-        for word in all_words:
-            if word.lower() not in seen:
-                seen.add(word.lower())
-                unique_words.append(word)
-        
-        all_words = unique_words
-        
-        if not all_words:
-            raise Exception("No vocabulary words found in file(s).")
-        
-        if len(self.input_files) > 1:
-            self.progress.emit(f"Total unique words from {len(self.input_files)} files: {len(all_words)}")
-        
-        # Track new words if enabled
-        words_to_process = all_words
-        duplicate_words = []
-        new_words = []
-        tracker = None
-        
-        if self.track_new_words:
-            tracker = WordTracker(self.tracker_file)
-            new_words, duplicate_words = tracker.get_new_words(all_words)
-            words_to_process = new_words + duplicate_words
-            
-            if len(new_words) == 0 and len(duplicate_words) == 0:
-                raise Exception("No new words found! All words have already been processed.")
-        
-        total_words = len(words_to_process)
-        self.progress.emit(f"Generating explanations for {total_words} words...")
-        
-        # Generate explanations and examples
-        generator = SentenceGenerator()
-        word_data = {}
-        duplicate_set = set(w.lower() for w in duplicate_words)
-        
-        for idx, word in enumerate(words_to_process, 1):
-            try:
-                is_duplicate = word.lower() in duplicate_set
-                
-                if is_duplicate and tracker:
-                    occurrence_count = tracker.get_occurrence_count(word)
-                    data = generator.generate_explanation_and_examples(word, self.examples_per_word, is_repeat=True)
-                    data['is_important'] = True
-                    data['occurrence_count'] = occurrence_count
-                else:
-                    data = generator.generate_explanation_and_examples(word, self.examples_per_word)
-                    data['is_important'] = False
-                
-                word_data[word] = data
-                
-                if idx % 10 == 0 or idx == total_words:
-                    self.progress.emit(f"Processing... {idx}/{total_words} words")
-                    
-            except Exception as e:
-                self.progress.emit(f"WARNING: Failed to generate for '{word}': {e}")
-                is_duplicate = word.lower() in duplicate_set
-                data = generator._generate_mock_explanation_and_examples(word, self.examples_per_word, is_repeat=is_duplicate)
-                data['is_important'] = is_duplicate
-                if is_duplicate and tracker:
-                    data['occurrence_count'] = tracker.get_occurrence_count(word)
-                word_data[word] = data
-        
-        self.progress.emit("Creating fill-in-the-blank tests...")
-        
-        # Create tests
-        test_generator = FillInBlankGenerator()
-        word_sentences = {word: data['examples'] for word, data in word_data.items()}
-        all_tests = test_generator.create_tests(word_sentences)
-        test_batches = test_generator.split_tests_into_batches(all_tests, self.test_batch_size)
-        
-        # Save to file
-        self.progress.emit(f"Saving results to: {self.output_file}")
-        self._save_results_to_file(
-            self.output_file, word_data, all_tests, test_batches,
-            total_words, new_words, duplicate_words, words_to_process
+        """Process one or more vocabulary files using shared processing function."""
+        # Use shared processing function from english_learner.py
+        result = process_vocabulary_files(
+            file_paths=self.input_files,
+            examples_per_word=self.examples_per_word,
+            output=self.output_file,
+            test_batch_size=self.test_batch_size,
+            words_per_section=self.words_per_section,
+            track_new_words=self.track_new_words,
+            tracker_file=self.tracker_file,
+            progress_callback=self.progress.emit  # Use GUI progress signal
         )
         
-        # Update tracker
-        if self.track_new_words:
-            tracker.add_words(words_to_process)
-            tracker.save()
-        
+        # Return result in format expected by GUI
         return {
-            'word_data': word_data,
-            'all_tests': all_tests,
-            'test_batches': test_batches,
-            'new_words': new_words,
-            'duplicate_words': duplicate_words,
-            'total_words': total_words,
-            'output_file': self.output_file
+            'word_data': result['word_data'],
+            'all_tests': result['all_tests'],
+            'test_batches': result['test_batches'],
+            'new_words': result['new_words'],
+            'duplicate_words': result['duplicate_words'],
+            'total_words': result['total_words'],
+            'output_file': result['output']
         }
     
-    def _save_results_to_file(self, output_path, word_data, all_tests, test_batches,
-                              total_words, new_words, duplicate_words, words_to_process):
-        """Save results to file."""
-        # Preserve original file order - create word list in the same order as words_to_process
-        word_list = []
-        for word in words_to_process:
-            if word in word_data:  # Only include words that were successfully processed
-                word_list.append((word, word_data[word]))
-        
-        word_sections = []
-        for i in range(0, len(word_list), self.words_per_section):
-            word_sections.append(word_list[i:i + self.words_per_section])
-        
-        word_to_tests = {}
-        for test_item in all_tests:
-            word = test_item['answer'].lower()
-            if word not in word_to_tests:
-                word_to_tests[word] = []
-            word_to_tests[word].append(test_item)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("=" * 80 + "\n")
-            f.write("VOCABULARY LEARNING MATERIALS\n")
-            f.write("=" * 80 + "\n\n")
-            f.write(f"Total Vocabulary Words: {total_words}\n")
-            if self.track_new_words and len(duplicate_words) > 0:
-                f.write(f"New Words: {len(new_words)}\n")
-                f.write(f"Important/Duplicate Words: {len(duplicate_words)} (appeared in previous learning)\n")
-            f.write(f"Examples per Word: {self.examples_per_word}\n")
-            f.write(f"Total Test Questions: {len(all_tests)}\n")
-            f.write(f"Words per Section: {self.words_per_section}\n")
-            f.write(f"Test Batch Size: {self.test_batch_size}\n")
-            f.write("=" * 80 + "\n\n\n")
-            
-            for section_num, word_section in enumerate(word_sections, 1):
-                f.write(f"SECTION {section_num}: VOCABULARY WORDS {((section_num - 1) * self.words_per_section) + 1}-{min(section_num * self.words_per_section, total_words)}\n")
-                f.write("=" * 80 + "\n\n")
-                
-                section_tests = []
-                
-                for idx, (word, data) in enumerate(word_section, 1):
-                    global_idx = (section_num - 1) * self.words_per_section + idx
-                    
-                    # Get pronunciation and format it (strip existing slashes if present)
-                    pronunciation = data.get('pronunciation', '')
-                    if pronunciation:
-                        # Remove leading/trailing slashes if present
-                        pronunciation = pronunciation.strip('/')
-                        pronunciation_text = f" /{pronunciation}/"
-                    else:
-                        pronunciation_text = ""
-                    
-                    if data.get('is_important', False):
-                        occurrence_count = data.get('occurrence_count', 1)
-                        f.write(f"{global_idx}. word: {word.lower()}{pronunciation_text} [IMPORTANT - appeared {occurrence_count} time(s) in previous learning]\n")
-                        f.write("-" * 80 + "\n")
-                        f.write("NOTE: This word appeared in previous learning sessions. Reviewing with different examples to reinforce understanding.\n\n")
-                    else:
-                        f.write(f"{global_idx}. word: {word.lower()}{pronunciation_text}\n")
-                        f.write("-" * 80 + "\n")
-                    
-                    f.write(f"explanation:\n{data['explanation']}\n\n")
-                    f.write("example:\n")
-                    for example in data['examples']:
-                        f.write(f"  • {example}\n")
-                    f.write("\n")
-                    
-                    if word.lower() in word_to_tests:
-                        section_tests.extend(word_to_tests[word.lower()])
-                
-                f.write("\n" + "=" * 80 + "\n\n")
-                
-                if section_tests:
-                    # Shuffle tests to randomize order (makes it more challenging)
-                    # Tests are shuffled so they don't appear in the same order as word explanations
-                    shuffled_tests = section_tests.copy()
-                    random.shuffle(shuffled_tests)
-                    
-                    section_test_batches = []
-                    for i in range(0, len(shuffled_tests), self.test_batch_size):
-                        section_test_batches.append(shuffled_tests[i:i + self.test_batch_size])
-                    
-                    for batch_num, batch in enumerate(section_test_batches, 1):
-                        f.write(f"TEST - Section {section_num}, Batch {batch_num} ({len(batch)} questions)\n")
-                        f.write("-" * 80 + "\n\n")
-                        
-                        for i, test_item in enumerate(batch, 1):
-                            f.write(f"Question {i}:\n")
-                            f.write(f"{test_item['sentence']}\n\n")
-                        
-                        f.write("\n" + "-" * 80 + "\n")
-                        f.write("ANSWERS:\n")
-                        f.write("-" * 80 + "\n\n")
-                        
-                        for i, test_item in enumerate(batch, 1):
-                            f.write(f"Question {i}: {test_item['answer']}\n")
-                            f.write(f"  Full sentence: {test_item['original']}\n\n")
-                        
-                        f.write("\n" + "=" * 80 + "\n\n\n")
+    # _save_results_to_file method removed - now using shared process_vocabulary_files() function
 
 
 class FindDialog(QDialog):
@@ -611,6 +532,9 @@ class EnglishLearnerGUI(QMainWindow):
         # Find dialog
         self.find_dialog = None
         
+        # Define reusable stylesheets
+        self._init_stylesheets()
+        
         # Setup UI
         self.setup_ui()
         
@@ -624,6 +548,112 @@ class EnglishLearnerGUI(QMainWindow):
         
         # Setup keyboard shortcuts
         self.setup_shortcuts()
+        
+        # Install event filter to catch Ctrl+PageUp/PageDown even when child widgets have focus
+        self.installEventFilter(self)
+    
+    def _show_status(self, message: str, status_type: str = "info", timeout: int = 0):
+        """
+        Show status message with color coding.
+        
+        Args:
+            message: The status message to display
+            status_type: Type of status - "success" (green), "error" (red), "warning" (yellow), "info" (default)
+            timeout: Timeout in milliseconds (0 = no timeout)
+        """
+        # Use HTML formatting for colors in status label
+        if status_type == "success":
+            colored_msg = f'<span style="color: #4CAF50; font-weight: bold;">{message}</span>'
+        elif status_type == "error":
+            colored_msg = f'<span style="color: #f44336; font-weight: bold;">{message}</span>'
+        elif status_type == "warning":
+            colored_msg = f'<span style="color: #FFC107; font-weight: bold;">{message}</span>'
+        else:  # info
+            colored_msg = message
+        
+        # Set the HTML text in the label
+        self.status_label.setText(colored_msg)
+        
+        # If timeout is specified, reset to "Ready" after timeout
+        if timeout > 0:
+            QTimer.singleShot(timeout, lambda: self._show_status("Ready", "info"))
+    
+    def _init_stylesheets(self):
+        """Initialize reusable stylesheet variables."""
+        # Common disabled state for all buttons
+        disabled_style = """
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #999999;
+            }
+        """
+        
+        # Primary button disabled state (needs border color)
+        primary_disabled_style = """
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #999999;
+                border-color: #444444;
+            }
+        """
+        
+        # Primary button style (Check New Words - most prominent)
+        self.style_primary_button = f"""
+            QPushButton {{
+                background-color: #2196F3;
+                color: white;
+                font-weight: bold;
+                font-size: 14pt;
+                padding: 12px 20px;
+                border: 2px solid #1976D2;
+                border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background-color: #1976D2;
+                border-color: #1565C0;
+            }}
+            QPushButton:pressed {{
+                background-color: #1565C0;
+            }}
+            {primary_disabled_style}
+        """
+        
+        # Secondary button style (Process Vocabulary File)
+        self.style_secondary_button = f"""
+            QPushButton {{
+                background-color: #4CAF50;
+                color: white;
+                font-weight: normal;
+                padding: 6px;
+                font-size: 10pt;
+            }}
+            {disabled_style}
+        """
+        
+        # Danger button style (Clear Tracker)
+        self.style_danger_button = f"""
+            QPushButton {{
+                background-color: #f44336;
+                color: white;
+                font-weight: normal;
+                padding: 6px;
+                font-size: 10pt;
+            }}
+            {disabled_style}
+        """
+        
+        # Purple button style (Load Results)
+        self.style_purple_button = f"""
+            QPushButton {{
+                background-color: #9C27B0;
+                color: white;
+                padding: 6px;
+            }}
+            {disabled_style}
+        """
+        
+        # Default button style (Browse buttons)
+        self.style_default_button = disabled_style
     
     def create_app_icon(self):
         """Create a fancy icon for the application - a book with a lightbulb representing learning."""
@@ -763,6 +793,57 @@ class EnglishLearnerGUI(QMainWindow):
         # Shift+F3 for find previous
         find_prev_shortcut = QShortcut(QKeySequence("Shift+F3"), self)
         find_prev_shortcut.activated.connect(self.find_previous_from_dialog)
+        
+        # Ctrl+PageUp to switch to previous tab (wraps around)
+        # Try multiple approaches to ensure it works
+        ctrl_pageup_shortcut = QShortcut(QKeySequence(Qt.CTRL + Qt.Key_PageUp), self)
+        ctrl_pageup_shortcut.setContext(Qt.ApplicationShortcut)  # Work application-wide
+        ctrl_pageup_shortcut.activated.connect(self.switch_to_previous_tab)
+        
+        # Ctrl+PageDown to switch to next tab (wraps around)
+        ctrl_pagedown_shortcut = QShortcut(QKeySequence(Qt.CTRL + Qt.Key_PageDown), self)
+        ctrl_pagedown_shortcut.setContext(Qt.ApplicationShortcut)  # Work application-wide
+        ctrl_pagedown_shortcut.activated.connect(self.switch_to_next_tab)
+    
+    def switch_to_previous_tab(self):
+        """Switch to previous tab (wraps around)."""
+        current_index = self.tab_widget.currentIndex()
+        previous_index = (current_index - 1) % self.tab_widget.count()
+        self.tab_widget.setCurrentIndex(previous_index)
+    
+    def switch_to_next_tab(self):
+        """Switch to next tab (wraps around)."""
+        current_index = self.tab_widget.currentIndex()
+        next_index = (current_index + 1) % self.tab_widget.count()
+        self.tab_widget.setCurrentIndex(next_index)
+    
+    def eventFilter(self, obj, event):
+        """Event filter to catch Ctrl+PageUp/PageDown globally."""
+        if event.type() == event.KeyPress:
+            # Check for Ctrl+PageUp (previous tab)
+            if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_PageUp:
+                self.switch_to_previous_tab()
+                return True
+            # Check for Ctrl+PageDown (next tab)
+            elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_PageDown:
+                self.switch_to_next_tab()
+                return True
+        return super().eventFilter(obj, event)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard events for tab navigation."""
+        # Check for Ctrl+PageUp (previous tab)
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_PageUp:
+            self.switch_to_previous_tab()
+            event.accept()
+            return
+        # Check for Ctrl+PageDown (next tab)
+        elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_PageDown:
+            self.switch_to_next_tab()
+            event.accept()
+            return
+        # Let other key events be handled normally
+        super().keyPressEvent(event)
     
     def show_find_dialog(self):
         """Show the find dialog."""
@@ -798,15 +879,21 @@ class EnglishLearnerGUI(QMainWindow):
         results_panel = self.create_results_panel()
         self.tab_widget.addTab(results_panel, "Results Panel")
         
-        # Status bar
+        # Status bar with HTML-capable label
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready")
+        
+        # Create a label for status messages that supports HTML
+        self.status_label = QLabel("Ready")
+        self.status_label.setTextFormat(Qt.RichText)  # Enable HTML/rich text
+        self.status_bar.addWidget(self.status_label)
         
         # Progress bar (hidden by default)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.progress_bar)
+        
+        self._show_status("Ready", "info")
         
     def create_control_panel(self):
         """Create the control panel tab."""
@@ -817,46 +904,43 @@ class EnglishLearnerGUI(QMainWindow):
         
         # File selection group - renamed to Control Panel
         file_group = QGroupBox("Control Panel")
-        file_layout = QVBoxLayout()
-        file_layout.setSpacing(3)  # Tight spacing between rows
+        file_layout = QGridLayout()
+        file_layout.setSpacing(5)
         file_layout.setContentsMargins(8, 8, 8, 8)
+        file_layout.setColumnStretch(0, 0)  # Don't stretch label column
+        file_layout.setColumnStretch(1, 1)  # Stretch file edit column
+        file_layout.setColumnStretch(2, 0)  # Don't stretch button column
+        file_layout.setColumnMinimumWidth(0, 100)  # Minimum width for labels
         
         # Input file
-        input_layout = QHBoxLayout()
-        input_layout.setSpacing(5)
-        input_layout.addWidget(QLabel("Input File:"))
+        file_layout.addWidget(QLabel("Input File:"), 0, 0)
         self.input_file_edit = QLineEdit()
         self.input_file_edit.setPlaceholderText("Select vocabulary file(s)... (Hold Ctrl/Cmd to select multiple)")
-        input_layout.addWidget(self.input_file_edit)
+        file_layout.addWidget(self.input_file_edit, 0, 1)
         self.browse_input_btn = QPushButton("Browse...")
+        self.browse_input_btn.setStyleSheet(self.style_default_button)
         self.browse_input_btn.clicked.connect(self.browse_input_file)
-        input_layout.addWidget(self.browse_input_btn)
-        file_layout.addLayout(input_layout)
+        file_layout.addWidget(self.browse_input_btn, 0, 2)
         
         # Output file
-        output_layout = QHBoxLayout()
-        output_layout.setSpacing(5)
-        output_layout.addWidget(QLabel("Output File:"))
+        file_layout.addWidget(QLabel("Output File:"), 1, 0)
         self.output_file_edit = QLineEdit()
         self.output_file_edit.setPlaceholderText("Auto-generated if empty...")
-        output_layout.addWidget(self.output_file_edit)
+        file_layout.addWidget(self.output_file_edit, 1, 1)
         self.browse_output_btn = QPushButton("Browse...")
+        self.browse_output_btn.setStyleSheet(self.style_default_button)
         self.browse_output_btn.clicked.connect(self.browse_output_file)
-        output_layout.addWidget(self.browse_output_btn)
-        file_layout.addLayout(output_layout)
+        file_layout.addWidget(self.browse_output_btn, 1, 2)
         
         # Load results file
-        results_file_layout = QHBoxLayout()
-        results_file_layout.setSpacing(5)
-        results_file_layout.addWidget(QLabel("Results File:"))
+        file_layout.addWidget(QLabel("Results File:"), 2, 0)
         self.results_file_edit = QLineEdit()
         self.results_file_edit.setPlaceholderText("Select a results file to view...")
-        results_file_layout.addWidget(self.results_file_edit)
+        file_layout.addWidget(self.results_file_edit, 2, 1)
         self.browse_results_btn = QPushButton("Load Results...")
-        self.browse_results_btn.setStyleSheet("background-color: #9C27B0; color: white; padding: 6px;")
+        self.browse_results_btn.setStyleSheet(self.style_purple_button)
         self.browse_results_btn.clicked.connect(self.load_results_file)
-        results_file_layout.addWidget(self.browse_results_btn)
-        file_layout.addLayout(results_file_layout)
+        file_layout.addWidget(self.browse_results_btn, 2, 2)
         
         file_group.setLayout(file_layout)
         control_layout.addWidget(file_group)
@@ -866,6 +950,10 @@ class EnglishLearnerGUI(QMainWindow):
         options_layout = QGridLayout()
         options_layout.setSpacing(5)  # Reduced spacing
         options_layout.setContentsMargins(8, 8, 8, 8)
+        options_layout.setColumnStretch(0, 0)  # Don't stretch label column
+        options_layout.setColumnStretch(1, 1)  # Stretch control column
+        options_layout.setColumnMinimumWidth(0, 120)  # Minimum width for labels
+        options_layout.setHorizontalSpacing(10)  # Reduced horizontal spacing between columns
         
         # Examples per word
         options_layout.addWidget(QLabel("Examples per word:"), 0, 0)
@@ -875,14 +963,6 @@ class EnglishLearnerGUI(QMainWindow):
         self.examples_spin.setValue(1)
         options_layout.addWidget(self.examples_spin, 0, 1)
         
-        # Words per section
-        options_layout.addWidget(QLabel("Words per section:"), 0, 2)
-        self.words_section_spin = QSpinBox()
-        self.words_section_spin.setMinimum(1)
-        self.words_section_spin.setMaximum(100)
-        self.words_section_spin.setValue(20)
-        options_layout.addWidget(self.words_section_spin, 0, 3)
-        
         # Test batch size
         options_layout.addWidget(QLabel("Test batch size:"), 1, 0)
         self.test_batch_spin = QSpinBox()
@@ -891,40 +971,60 @@ class EnglishLearnerGUI(QMainWindow):
         self.test_batch_spin.setValue(20)
         options_layout.addWidget(self.test_batch_spin, 1, 1)
         
-        # Tracker file
-        options_layout.addWidget(QLabel("Tracker file:"), 1, 2)
-        self.tracker_edit = QLineEdit("processed_words.json")
-        options_layout.addWidget(self.tracker_edit, 1, 3)
+        # Words per section - below test batch size row
+        options_layout.addWidget(QLabel("Words per section:"), 2, 0)
+        self.words_section_spin = QSpinBox()
+        self.words_section_spin.setMinimum(1)
+        self.words_section_spin.setMaximum(100)
+        self.words_section_spin.setValue(20)
+        options_layout.addWidget(self.words_section_spin, 2, 1)
         
-        # Track new words checkbox
-        self.track_new_checkbox = QCheckBox("Track new words only")
-        self.track_new_checkbox.setChecked(True)
-        options_layout.addWidget(self.track_new_checkbox, 2, 0, 1, 2)
+        # Tracker file - show absolute path (read-only label) - below words per section
+        options_layout.addWidget(QLabel("Tracker file:"), 3, 0)
+        # Use Documents directory for tracker file
+        tracker_file_default = os.path.join(r"C:\Users\Admin\Documents", "processed_words.json")
+        self.tracker_file_path = tracker_file_default  # Store path for use in processing
+        self.tracker_label = QLabel(tracker_file_default)
+        self.tracker_label.setStyleSheet("color: #888888; font-style: italic;")
+        self.tracker_label.setWordWrap(True)
+        options_layout.addWidget(self.tracker_label, 3, 1)
         
         options_group.setLayout(options_layout)
         control_layout.addWidget(options_group)
         
-        # Buttons
+        # Main button - Check New Words (centered)
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(5)
+        buttons_layout.addStretch()
         
-        self.process_btn = QPushButton("Process Vocabulary File")
-        self.process_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;")
-        self.process_btn.clicked.connect(self.process_file)
-        buttons_layout.addWidget(self.process_btn)
-        
+        # Check New Words - Most used button, make it stand out (center)
         self.check_new_btn = QPushButton("Check New Words")
-        self.check_new_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
+        self.check_new_btn.setStyleSheet(self.style_primary_button)
         self.check_new_btn.clicked.connect(self.check_new_words)
         buttons_layout.addWidget(self.check_new_btn)
         
-        self.clear_tracker_btn = QPushButton("Clear Tracker")
-        self.clear_tracker_btn.setStyleSheet("background-color: #f44336; color: white; padding: 8px;")
-        self.clear_tracker_btn.clicked.connect(self.clear_tracker)
-        buttons_layout.addWidget(self.clear_tracker_btn)
-        
         buttons_layout.addStretch()
         control_layout.addLayout(buttons_layout)
+        
+        # Secondary buttons at the bottom - Process and Clear Tracker
+        secondary_buttons_layout = QHBoxLayout()
+        secondary_buttons_layout.setSpacing(5)
+        secondary_buttons_layout.addStretch()
+        
+        # Process Vocabulary File - Less prominent, styled like Browse button
+        self.process_btn = QPushButton("Process Vocabulary File")
+        self.process_btn.setStyleSheet(self.style_default_button)
+        self.process_btn.clicked.connect(self.process_file)
+        secondary_buttons_layout.addWidget(self.process_btn)
+        
+        # Clear Tracker - Least prominent, styled like Browse button
+        self.clear_tracker_btn = QPushButton("Clear Tracker")
+        self.clear_tracker_btn.setStyleSheet(self.style_default_button)
+        self.clear_tracker_btn.clicked.connect(self.clear_tracker)
+        secondary_buttons_layout.addWidget(self.clear_tracker_btn)
+        
+        secondary_buttons_layout.addStretch()
+        control_layout.addLayout(secondary_buttons_layout)
         
         # Add stretch to push everything to top
         control_layout.addStretch()
@@ -1015,38 +1115,330 @@ class EnglishLearnerGUI(QMainWindow):
         
     def browse_input_file(self):
         """Browse for input file(s) - supports multiple file selection."""
-        filenames, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select Vocabulary File(s) - Hold Ctrl/Cmd to select multiple",
-            "",
-            "All supported (*.html *.htm *.txt *.md);;HTML files (*.html *.htm);;Text files (*.txt);;Markdown files (*.md);;All files (*.*)"
-        )
+        # Default directory
+        default_dir = r"C:\Users\Admin\Documents"
+        
+        # Ensure directory exists, fallback to current directory if not
+        if not os.path.exists(default_dir):
+            default_dir = os.getcwd()
+        
+        # Create file dialog
+        dialog = QFileDialog(self, "Select Vocabulary File(s) - Hold Ctrl/Cmd to select multiple", default_dir)
+        dialog.setFileMode(QFileDialog.ExistingFiles)
+        dialog.setNameFilter("HTML files (*.html *.htm);;All supported (*.html *.htm *.txt *.md);;Text files (*.txt);;Markdown files (*.md);;All files (*.*)")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        
+        # Apply dark theme styling to file dialog
+        dialog.setStyleSheet("""
+            QFileDialog {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QFileDialog QListView, QFileDialog QTreeView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QFileDialog QListView::item, QFileDialog QTreeView::item {
+                padding: 5px;
+                border-radius: 3px;
+                color: #d4d4d4;
+            }
+            QFileDialog QListView::item:hover, QFileDialog QTreeView::item:hover {
+                background-color: #2a2d2e;
+                color: #ffffff;
+            }
+            QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+                background-color: #094771;
+                color: #ffffff;
+            }
+            QFileDialog QLineEdit {
+                padding: 8px;
+                border: 2px solid #3e3e42;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                font-size: 11pt;
+            }
+            QFileDialog QLineEdit:focus {
+                border-color: #007acc;
+                background-color: #252526;
+            }
+            QFileDialog QPushButton {
+                background-color: #007acc;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QFileDialog QPushButton:hover {
+                background-color: #005a9e;
+            }
+            QFileDialog QPushButton:pressed {
+                background-color: #004578;
+            }
+            QFileDialog QComboBox {
+                padding: 6px;
+                border: 2px solid #3e3e42;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QFileDialog QComboBox:focus {
+                border-color: #007acc;
+            }
+            QFileDialog QComboBox::drop-down {
+                border: none;
+            }
+            QFileDialog QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                selection-background-color: #094771;
+            }
+            QFileDialog QLabel {
+                color: #d4d4d4;
+            }
+            QFileDialog QToolButton {
+                background-color: #3e3e42;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 3px;
+            }
+            QFileDialog QToolButton:hover {
+                background-color: #505050;
+            }
+        """)
+        
+        if dialog.exec_() == QFileDialog.Accepted:
+            filenames = dialog.selectedFiles()
+        else:
+            filenames = []
         if filenames:
             # Display multiple files separated by semicolon
             file_list = "; ".join(filenames)
             self.input_file_edit.setText(file_list)
             if len(filenames) > 1:
-                self.statusBar().showMessage(f"Selected {len(filenames)} files", 3000)
+                self._show_status(f"Selected {len(filenames)} files", "success", timeout=3000)
             
     def browse_output_file(self):
         """Browse for output file."""
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Output File",
-            "",
-            "Text files (*.txt);;All files (*.*)"
-        )
+        # Default directory
+        default_dir = r"C:\Users\Admin\Documents"
+        
+        # Ensure directory exists, fallback to current directory if not
+        if not os.path.exists(default_dir):
+            default_dir = os.getcwd()
+        
+        # Create file dialog with files-first sorting
+        dialog = QFileDialog(self, "Save Output File", default_dir)
+        dialog.setFileMode(QFileDialog.AnyFile)
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setNameFilter("Text files (*.txt);;All files (*.*)")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        
+        # Apply dark theme styling to file dialog
+        dialog.setStyleSheet("""
+            QFileDialog {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QFileDialog QListView, QFileDialog QTreeView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QFileDialog QListView::item, QFileDialog QTreeView::item {
+                padding: 5px;
+                border-radius: 3px;
+                color: #d4d4d4;
+            }
+            QFileDialog QListView::item:hover, QFileDialog QTreeView::item:hover {
+                background-color: #2a2d2e;
+                color: #ffffff;
+            }
+            QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+                background-color: #094771;
+                color: #ffffff;
+            }
+            QFileDialog QLineEdit {
+                padding: 8px;
+                border: 2px solid #3e3e42;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                font-size: 11pt;
+            }
+            QFileDialog QLineEdit:focus {
+                border-color: #007acc;
+                background-color: #252526;
+            }
+            QFileDialog QPushButton {
+                background-color: #007acc;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QFileDialog QPushButton:hover {
+                background-color: #005a9e;
+            }
+            QFileDialog QPushButton:pressed {
+                background-color: #004578;
+            }
+            QFileDialog QComboBox {
+                padding: 6px;
+                border: 2px solid #3e3e42;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QFileDialog QComboBox:focus {
+                border-color: #007acc;
+            }
+            QFileDialog QComboBox::drop-down {
+                border: none;
+            }
+            QFileDialog QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                selection-background-color: #094771;
+            }
+            QFileDialog QLabel {
+                color: #d4d4d4;
+            }
+            QFileDialog QToolButton {
+                background-color: #3e3e42;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 3px;
+            }
+            QFileDialog QToolButton:hover {
+                background-color: #505050;
+            }
+        """)
+        
+        if dialog.exec_() == QFileDialog.Accepted:
+            filename = dialog.selectedFiles()[0] if dialog.selectedFiles() else ""
+        else:
+            filename = ""
         if filename:
             self.output_file_edit.setText(filename)
     
     def load_results_file(self):
         """Load and display a results file."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Results File",
-            "",
-            "Text files (*.txt);;All files (*.*)"
-        )
+        # Default directory
+        default_dir = r"C:\Users\Admin\Documents"
+        
+        # Ensure directory exists, fallback to current directory if not
+        if not os.path.exists(default_dir):
+            default_dir = os.getcwd()
+        
+        # Create file dialog with files-first sorting
+        dialog = QFileDialog(self, "Load Results File", default_dir)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setNameFilter("Text files (*.txt);;All files (*.*)")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        
+        # Apply dark theme styling to file dialog
+        dialog.setStyleSheet("""
+            QFileDialog {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QFileDialog QListView, QFileDialog QTreeView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QFileDialog QListView::item, QFileDialog QTreeView::item {
+                padding: 5px;
+                border-radius: 3px;
+                color: #d4d4d4;
+            }
+            QFileDialog QListView::item:hover, QFileDialog QTreeView::item:hover {
+                background-color: #2a2d2e;
+                color: #ffffff;
+            }
+            QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+                background-color: #094771;
+                color: #ffffff;
+            }
+            QFileDialog QLineEdit {
+                padding: 8px;
+                border: 2px solid #3e3e42;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                font-size: 11pt;
+            }
+            QFileDialog QLineEdit:focus {
+                border-color: #007acc;
+                background-color: #252526;
+            }
+            QFileDialog QPushButton {
+                background-color: #007acc;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QFileDialog QPushButton:hover {
+                background-color: #005a9e;
+            }
+            QFileDialog QPushButton:pressed {
+                background-color: #004578;
+            }
+            QFileDialog QComboBox {
+                padding: 6px;
+                border: 2px solid #3e3e42;
+                border-radius: 4px;
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+            }
+            QFileDialog QComboBox:focus {
+                border-color: #007acc;
+            }
+            QFileDialog QComboBox::drop-down {
+                border: none;
+            }
+            QFileDialog QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                selection-background-color: #094771;
+            }
+            QFileDialog QLabel {
+                color: #d4d4d4;
+            }
+            QFileDialog QToolButton {
+                background-color: #3e3e42;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 3px;
+            }
+            QFileDialog QToolButton:hover {
+                background-color: #505050;
+            }
+        """)
+        
+        if dialog.exec_() == QFileDialog.Accepted:
+            filename = dialog.selectedFiles()[0] if dialog.selectedFiles() else ""
+        else:
+            filename = ""
         
         if not filename:
             return
@@ -1074,12 +1466,48 @@ class EnglishLearnerGUI(QMainWindow):
             # Switch to Results Panel tab
             self.tab_widget.setCurrentIndex(1)
             
-            self.status_bar.showMessage(f"Loaded: {os.path.basename(filename)}")
-            QMessageBox.information(self, "Success", f"Results file loaded successfully!\n\n{os.path.basename(filename)}")
+            self._show_status(f"Loaded: {os.path.basename(filename)}", "success")
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load file:\n{str(e)}")
-            self.status_bar.showMessage("Error loading file")
+            self._show_status("Error loading file", "error")
+    
+    def _extract_word_count_from_content(self, content):
+        """Extract total word count from file content."""
+        try:
+            # First check if we have a stored word count from recent processing
+            if hasattr(self, '_last_word_count') and self._last_word_count > 0:
+                return self._last_word_count
+            
+            # Look for patterns like "Total words: 100" or "Summary: ... 100 vocabulary words"
+            lines = content.split('\n')
+            for line in lines:
+                # Pattern 1: "Total words: X"
+                match = re.search(r'Total words?:\s*(\d+)', line, re.IGNORECASE)
+                if match:
+                    return int(match.group(1))
+                
+                # Pattern 2: "X vocabulary words processed"
+                match = re.search(r'(\d+)\s+vocabulary\s+words?\s+processed', line, re.IGNORECASE)
+                if match:
+                    return int(match.group(1))
+                
+                # Pattern 3: "X words" in summary section
+                match = re.search(r'(\d+)\s+words?', line, re.IGNORECASE)
+                if match and 'summary' in line.lower():
+                    return int(match.group(1))
+            
+            # Count unique words from section headers as fallback
+            word_count = 0
+            for line in lines:
+                section_match = re.match(r'SECTION \d+: VOCABULARY WORDS (\d+)-(\d+)', line)
+                if section_match:
+                    end_word = int(section_match.group(2))
+                    word_count = max(word_count, end_word)
+            
+            return word_count if word_count > 0 else 0
+        except Exception:
+            return 0
     
     def build_navigation_tree(self, content):
         """Build navigation tree from file content."""
@@ -1098,7 +1526,13 @@ class EnglishLearnerGUI(QMainWindow):
             
             # Main header
             if "VOCABULARY LEARNING MATERIALS" in line_stripped:
-                item = QTreeWidgetItem(root_item, ["📚 Main Header"])
+                # Try to extract word count from the file
+                word_count = self._extract_word_count_from_content(content)
+                if word_count > 0:
+                    header_text = f"📚 Main Header ({word_count} words)"
+                else:
+                    header_text = "📚 Main Header"
+                item = QTreeWidgetItem(root_item, [header_text])
                 item.setData(0, Qt.UserRole, line_num)
                 self.section_positions["Main Header"] = line_num
                 root_item = item
@@ -1254,6 +1688,52 @@ class EnglishLearnerGUI(QMainWindow):
         root = self.nav_tree.invisibleRootItem()
         for i in range(root.childCount()):
             find_and_highlight(root.child(i), section_name)
+    
+    def _lock_ui(self):
+        """Lock all UI elements during processing."""
+        # Disable all buttons
+        self.browse_input_btn.setEnabled(False)
+        self.browse_output_btn.setEnabled(False)
+        self.browse_results_btn.setEnabled(False)
+        self.process_btn.setEnabled(False)
+        self.check_new_btn.setEnabled(False)
+        self.clear_tracker_btn.setEnabled(False)
+        
+        # Disable all input fields
+        self.input_file_edit.setEnabled(False)
+        self.output_file_edit.setEnabled(False)
+        self.results_file_edit.setEnabled(False)
+        # tracker_label is read-only, no need to disable
+        
+        # Disable all spin boxes
+        self.examples_spin.setEnabled(False)
+        self.words_section_spin.setEnabled(False)
+        self.test_batch_spin.setEnabled(False)
+        
+        # Checkbox removed - no longer needed
+    
+    def _unlock_ui(self):
+        """Unlock all UI elements after processing."""
+        # Enable all buttons
+        self.browse_input_btn.setEnabled(True)
+        self.browse_output_btn.setEnabled(True)
+        self.browse_results_btn.setEnabled(True)
+        self.process_btn.setEnabled(True)
+        self.check_new_btn.setEnabled(True)
+        self.clear_tracker_btn.setEnabled(True)
+        
+        # Enable all input fields
+        self.input_file_edit.setEnabled(True)
+        self.output_file_edit.setEnabled(True)
+        self.results_file_edit.setEnabled(True)
+        # tracker_label is read-only, no need to enable
+        
+        # Enable all spin boxes
+        self.examples_spin.setEnabled(True)
+        self.words_section_spin.setEnabled(True)
+        self.test_batch_spin.setEnabled(True)
+        
+        # Checkbox removed - no longer needed
             
     def process_file(self):
         """Process one or more vocabulary files."""
@@ -1302,7 +1782,8 @@ class EnglishLearnerGUI(QMainWindow):
         output_path = self.output_file_edit.text().strip()
         if not output_path:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = f"vocabulary_learning_materials_{timestamp}.txt"
+            # Use Documents directory for output files
+            output_path = os.path.join(r"C:\Users\Admin\Documents", f"vocabulary_learning_materials_{timestamp}.txt")
             self.output_file_edit.setText(output_path)
         
         # Clear results
@@ -1315,10 +1796,8 @@ class EnglishLearnerGUI(QMainWindow):
         self.append_text("VOCABULARY LEARNING MATERIALS\n", 'header')
         self.append_text("=" * 80 + "\n\n", 'header')
         
-        # Disable buttons
-        self.process_btn.setEnabled(False)
-        self.check_new_btn.setEnabled(False)
-        self.clear_tracker_btn.setEnabled(False)
+        # Lock all UI elements
+        self._lock_ui()
         
         # Show progress bar
         self.progress_bar.setVisible(True)
@@ -1331,8 +1810,8 @@ class EnglishLearnerGUI(QMainWindow):
             self.examples_spin.value(),
             self.test_batch_spin.value(),
             self.words_section_spin.value(),
-            self.track_new_checkbox.isChecked(),
-            self.tracker_edit.text()
+            True,  # Always track new words (checkbox removed - use "Check New Words" button for new words only)
+            self.tracker_file_path
         )
         self.processing_thread.progress.connect(self.on_progress)
         self.processing_thread.finished.connect(self.on_finished)
@@ -1341,17 +1820,17 @@ class EnglishLearnerGUI(QMainWindow):
         
     def on_progress(self, message):
         """Handle progress updates."""
-        self.status_bar.showMessage(message)
+        self._show_status(message, "info")
         self.append_text(f"{message}\n")
         
     def on_finished(self, result):
         """Handle processing completion."""
         self.progress_bar.setVisible(False)
-        self.status_bar.showMessage(f"Complete! Processed {result['total_words']} words")
+        self._show_status(f"Complete! Processed {result['total_words']} words", "success")
         
         # Load the output file into results viewer
-        output_file = result['output_file']
-        if os.path.exists(output_file):
+        output_file = result.get('output_file') or result.get('output')  # Support both keys
+        if output_file and os.path.exists(output_file):
             self.current_file_path = output_file
             self.results_file_edit.setText(output_file)
             
@@ -1362,6 +1841,8 @@ class EnglishLearnerGUI(QMainWindow):
             self.results_text.clear()
             self.results_text.setPlainText(content)
             
+            # Store word count for navigation tree
+            self._last_word_count = result.get('total_words', 0)
             # Build navigation
             self.build_navigation_tree(content)
             
@@ -1371,27 +1852,17 @@ class EnglishLearnerGUI(QMainWindow):
         # Display results summary
         self._display_results_summary(result)
         
-        # Re-enable buttons
-        self.process_btn.setEnabled(True)
-        self.check_new_btn.setEnabled(True)
-        self.clear_tracker_btn.setEnabled(True)
-        
-        QMessageBox.information(
-            self,
-            "Success",
-            f"Processing complete!\n\nProcessed: {result['total_words']} words\nOutput: {result['output_file']}"
-        )
+        # Unlock all UI elements
+        self._unlock_ui()
         
     def on_error(self, error_msg):
         """Handle processing errors."""
         self.progress_bar.setVisible(False)
-        self.status_bar.showMessage("Error occurred")
+        self._show_status("Error occurred", "error")
         self.append_text(f"\nERROR:\n{error_msg}\n", 'important')
         
-        # Re-enable buttons
-        self.process_btn.setEnabled(True)
-        self.check_new_btn.setEnabled(True)
-        self.clear_tracker_btn.setEnabled(True)
+        # Unlock all UI elements
+        self._unlock_ui()
         
         QMessageBox.critical(self, "Error", f"An error occurred:\n{error_msg.split(chr(10))[0]}")
         
@@ -1448,7 +1919,11 @@ class EnglishLearnerGUI(QMainWindow):
         pass
             
     def check_new_words(self):
-        """Check for new words without processing (supports multiple files)."""
+        """Check for new words and generate learning materials (supports multiple files)."""
+        if self.processing_thread and self.processing_thread.isRunning():
+            QMessageBox.warning(self, "Processing", "A process is already running. Please wait.")
+            return
+            
         input_text = self.input_file_edit.text().strip()
         if not input_text:
             QMessageBox.critical(self, "Error", "Please select input file(s).")
@@ -1485,85 +1960,78 @@ class EnglishLearnerGUI(QMainWindow):
         if not valid_paths:
             QMessageBox.critical(self, "Error", "No valid input files found.")
             return
+        
+        # Determine output file - generate full path in Documents directory
+        output_path = self.output_file_edit.text().strip()
+        if not output_path:
+            # Generate default filename with timestamp in Documents directory
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(r"C:\Users\Admin\Documents", f"vocabulary_learning_materials_checknew_{timestamp}.txt")
+        
+        # Clear results
+        self.results_text.clear()
+        self.nav_tree.clear()
+        self.section_positions = {}
+        self.current_file_path = None
+        
+        self.append_text("=" * 80 + "\n", 'header')
+        self.append_text("CHECKING FOR NEW WORDS AND GENERATING MATERIALS\n", 'header')
+        self.append_text("=" * 80 + "\n\n", 'header')
+        
+        # Lock all UI elements
+        self._lock_ui()
+        
+        # Show progress bar
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Indeterminate
+        
+        # Start processing thread
+        self.processing_thread = CheckNewThread(
+            valid_paths,  # Pass list of files
+            output_path,
+            self.examples_spin.value(),
+            self.test_batch_spin.value(),
+            self.words_section_spin.value(),
+            self.tracker_file_path
+        )
+        self.processing_thread.progress.connect(self.on_progress)
+        self.processing_thread.finished.connect(self.on_check_new_finished)
+        self.processing_thread.error.connect(self.on_error)
+        self.processing_thread.start()
+    
+    def on_check_new_finished(self, result):
+        """Handle check-new processing completion."""
+        self.progress_bar.setVisible(False)
+        
+        if result['total_words'] == 0:
+            self._show_status("No new words found - all words already processed", "warning")
+        else:
+            self._show_status(f"Complete! Processed {result['total_words']} new words", "success")
             
-        try:
-            self.results_text.clear()
-            self.nav_tree.clear()
-            if len(valid_paths) > 1:
-                self.append_text(f"Checking for new words in {len(valid_paths)} files...\n\n", 'header')
-            else:
-                self.append_text("Checking for new words...\n\n", 'header')
-            
-            loader = VocabularyLoader()
-            all_words = []
-            
-            # Load words from all files
-            for input_path in valid_paths:
-                words_from_file = loader.load_file(input_path)
-                all_words.extend(words_from_file)
-                if len(valid_paths) > 1:
-                    self.append_text(f"Loaded {len(words_from_file)} words from {os.path.basename(input_path)}\n", 'header')
-            
-            # Remove duplicates while preserving order
-            seen = set()
-            unique_words = []
-            for word in all_words:
-                if word.lower() not in seen:
-                    seen.add(word.lower())
-                    unique_words.append(word)
-            
-            all_words = unique_words
-            
-            if len(valid_paths) > 1:
-                self.append_text(f"\nTotal unique words from {len(valid_paths)} files: {len(all_words)}\n\n", 'header')
-            
-            if not all_words:
-                self.append_text("ERROR: No vocabulary words found in file.\n", 'important')
-                return
-            
-            tracker = WordTracker(self.tracker_edit.text())
-            stats = tracker.get_stats()
-            
-            new_words, duplicate_words = tracker.get_new_words(all_words)
-            
-            self.append_text("Word Analysis:\n", 'header')
-            self.append_text(f"  • Total words in file: {len(all_words)}\n")
-            self.append_text(f"  • Already processed: {len(duplicate_words)}\n")
-            self.append_text(f"  • New words: {len(new_words)}\n")
-            self.append_text(f"  • Total tracked: {stats['total_processed']}\n\n")
-            
-            if duplicate_words:
-                self.append_text("Important words (appeared before):\n", 'important')
-                for i, word in enumerate(duplicate_words[:20], 1):
-                    count = tracker.get_occurrence_count(word)
-                    word_display = loader.format_word_with_pronunciation(word)
-                    self.append_text(f"  {i}. {word_display} (appeared {count} time(s))\n", 'important')
-                if len(duplicate_words) > 20:
-                    self.append_text(f"  ... and {len(duplicate_words) - 20} more\n", 'important')
-                self.append_text("\n")
-            
-            if new_words:
-                self.append_text("New words found:\n", 'word')
-                for i, word in enumerate(new_words[:50], 1):
-                    word_display = loader.format_word_with_pronunciation(word)
-                    self.append_text(f"  {i}. {word_display}\n", 'word')
-                if len(new_words) > 50:
-                    self.append_text(f"  ... and {len(new_words) - 50} more\n", 'word')
-            elif not duplicate_words:
-                self.append_text("No new words found! All words have already been processed.\n", 'important')
-            
-            # Switch to Results Panel tab
-            self.tab_widget.setCurrentIndex(1)
+            # Load the output file into results viewer
+            output_file = result['output']
+            if os.path.exists(output_file):
+                self.current_file_path = output_file
+                self.results_file_edit.setText(output_file)
                 
-            self.status_bar.showMessage("Check complete")
-            
-        except Exception as e:
-            self.append_text(f"Error: {str(e)}\n", 'important')
-            self.status_bar.showMessage("Error occurred")
-            QMessageBox.critical(self, "Error", f"An error occurred:\n{str(e)}")
+                # Read and display
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                self.results_text.clear()
+                self.results_text.setPlainText(content)
+                
+                # Build navigation
+                self.build_navigation_tree(content)
+                
+                # Switch to Results Panel tab
+                self.tab_widget.setCurrentIndex(1)
+        
+        # Unlock all UI elements
+        self._unlock_ui()
             
     def clear_tracker(self):
-        """Clear the tracker file."""
+        """Clear the tracker file using shared function."""
         reply = QMessageBox.question(
             self,
             "Confirm Clear",
@@ -1576,22 +2044,25 @@ class EnglishLearnerGUI(QMainWindow):
             return
             
         try:
-            tracker_file = self.tracker_edit.text()
-            tracker = WordTracker(tracker_file)
-            stats_before = tracker.get_stats()
-            tracker.clear()
+            tracker_file = self.tracker_file_path
             
-            self.results_text.clear()
-            self.append_text(f"Tracker cleared successfully!\n", 'header')
-            self.append_text(f"Removed {stats_before['total_processed']} tracked words\n", 'important')
-            self.append_text(f"File deleted: {tracker_file}\n", 'important')
+            # Use shared function
+            result = clear_word_tracker(tracker_file, skip_confirmation=True)
             
-            self.status_bar.showMessage("Tracker cleared")
-            QMessageBox.information(self, "Success", "Tracker cleared successfully!")
+            if result['success']:
+                self.results_text.clear()
+                self.append_text(f"Tracker cleared successfully!\n", 'header')
+                self.append_text(f"Removed {result['words_removed']} tracked words\n", 'important')
+                self.append_text(f"File deleted: {result['tracker_file']}\n", 'important')
+                
+                self._show_status("Tracker cleared", "success")
+            else:
+                self.append_text(f"{result['message']}\n", 'important')
+                self._show_status("No tracker to clear", "warning")
             
         except Exception as e:
             self.append_text(f"Error: {str(e)}\n", 'important')
-            self.status_bar.showMessage("Error occurred")
+            self._show_status("Error occurred", "error")
             QMessageBox.critical(self, "Error", f"An error occurred:\n{str(e)}")
 
 
