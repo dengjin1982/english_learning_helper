@@ -15,8 +15,9 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QFileDialog, QMessageBox,
     QGroupBox, QGridLayout, QSpinBox, QCheckBox, QStatusBar, QProgressBar,
     QSplitter, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
-    QTabWidget, QDialog, QShortcut
+    QTabWidget, QDialog, QShortcut, QComboBox
 )
+from PyQt5.QtGui import QClipboard
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QSize, QDir, QSortFilterProxyModel, QModelIndex
 from PyQt5.QtWidgets import QFileSystemModel, QListView, QTreeView
 from PyQt5.QtGui import QFont, QTextCharFormat, QColor, QSyntaxHighlighter, QTextCursor, QKeySequence, QIcon, QPixmap, QPainter, QPen, QBrush
@@ -175,7 +176,7 @@ class CheckNewThread(QThread):
     error = pyqtSignal(str)
     
     def __init__(self, input_files, output_file, examples_per_word, test_batch_size,
-                 words_per_section, tracker_file):
+                 words_per_section, tracker_file, ai_provider='google', use_batch=False):
         super().__init__()
         self.input_files = input_files if isinstance(input_files, list) else [input_files]
         self.output_file = output_file
@@ -183,6 +184,8 @@ class CheckNewThread(QThread):
         self.test_batch_size = test_batch_size
         self.words_per_section = words_per_section
         self.tracker_file = tracker_file
+        self.ai_provider = ai_provider
+        self.use_batch = use_batch
     
     def run(self):
         """Run the check-new processing in background thread."""
@@ -194,7 +197,8 @@ class CheckNewThread(QThread):
                 examples_per_word=self.examples_per_word,
                 test_batch_size=self.test_batch_size,
                 words_per_section=self.words_per_section,
-                progress_callback=self.progress.emit  # Use GUI progress signal
+                progress_callback=self.progress.emit,  # Use GUI progress signal
+                ai_provider=self.ai_provider
             )
             self.finished.emit(result)
         except Exception as e:
@@ -210,7 +214,7 @@ class ProcessingThread(QThread):
     error = pyqtSignal(str)
     
     def __init__(self, input_files, output_file, examples_per_word, test_batch_size,
-                 words_per_section, track_new_words, tracker_file):
+                 words_per_section, track_new_words, tracker_file, ai_provider='google', use_batch=False):
         super().__init__()
         self.input_files = input_files if isinstance(input_files, list) else [input_files]
         self.output_file = output_file
@@ -219,6 +223,8 @@ class ProcessingThread(QThread):
         self.words_per_section = words_per_section
         self.track_new_words = track_new_words
         self.tracker_file = tracker_file
+        self.ai_provider = ai_provider
+        self.use_batch = use_batch
     
     def run(self):
         """Run the processing in background thread."""
@@ -240,7 +246,9 @@ class ProcessingThread(QThread):
             words_per_section=self.words_per_section,
             track_new_words=self.track_new_words,
             tracker_file=self.tracker_file,
-            progress_callback=self.progress.emit  # Use GUI progress signal
+            progress_callback=self.progress.emit,  # Use GUI progress signal
+            ai_provider=self.ai_provider,
+            use_batch_processing=self.use_batch
         )
         
         # Return result in format expected by GUI
@@ -879,6 +887,10 @@ class EnglishLearnerGUI(QMainWindow):
         results_panel = self.create_results_panel()
         self.tab_widget.addTab(results_panel, "Results Panel")
         
+        # Tokens Panel Tab
+        tokens_panel = self.create_tokens_panel()
+        self.tab_widget.addTab(tokens_panel, "Tokens Panel")
+        
         # Status bar with HTML-capable label
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -979,15 +991,27 @@ class EnglishLearnerGUI(QMainWindow):
         self.words_section_spin.setValue(20)
         options_layout.addWidget(self.words_section_spin, 2, 1)
         
-        # Tracker file - show absolute path (read-only label) - below words per section
-        options_layout.addWidget(QLabel("Tracker file:"), 3, 0)
-        # Use Documents directory for tracker file
-        tracker_file_default = os.path.join(r"C:\Users\Admin\Documents", "processed_words.json")
-        self.tracker_file_path = tracker_file_default  # Store path for use in processing
-        self.tracker_label = QLabel(tracker_file_default)
+        # AI Provider - below words per section
+        options_layout.addWidget(QLabel("AI Provider:"), 3, 0)
+        self.ai_provider_combo = QComboBox()
+        self.ai_provider_combo.addItems(["Google AI (Gemini)", "OpenAI (ChatGPT)", "DeepSeek", "Anthropic (Claude)"])
+        self.ai_provider_combo.setCurrentIndex(0)  # Default to Google AI
+        options_layout.addWidget(self.ai_provider_combo, 3, 1)
+        
+        # Batch Processing - below AI provider
+        options_layout.addWidget(QLabel("Batch Processing:"), 4, 0)
+        self.use_batch_checkbox = QCheckBox("Enable batch processing (faster, multiple words per API call)")
+        self.use_batch_checkbox.setChecked(False)  # Default to disabled
+        options_layout.addWidget(self.use_batch_checkbox, 4, 1)
+        
+        # Tracker file - show absolute path (read-only label) - below batch processing
+        options_layout.addWidget(QLabel("Tracker file:"), 5, 0)
+        # Initial tracker file path - will be updated when input file is selected
+        self.tracker_file_path = ""  # Will be set when input file is selected
+        self.tracker_label = QLabel("(Select input file to see tracker file path)")
         self.tracker_label.setStyleSheet("color: #888888; font-style: italic;")
         self.tracker_label.setWordWrap(True)
-        options_layout.addWidget(self.tracker_label, 3, 1)
+        options_layout.addWidget(self.tracker_label, 5, 1)
         
         options_group.setLayout(options_layout)
         control_layout.addWidget(options_group)
@@ -1030,6 +1054,262 @@ class EnglishLearnerGUI(QMainWindow):
         control_layout.addStretch()
         
         return control_widget
+    
+    def create_tokens_panel(self):
+        """Create the tokens panel tab to display words/tokens for manual AI provider input."""
+        tokens_widget = QWidget()
+        tokens_layout = QVBoxLayout(tokens_widget)
+        tokens_layout.setContentsMargins(10, 10, 10, 10)
+        tokens_layout.setSpacing(10)
+        
+        # Header
+        header_label = QLabel("📋 Tokens for Manual AI Provider Input")
+        header_label.setStyleSheet("""
+            QLabel {
+                font-size: 14pt;
+                font-weight: bold;
+                color: #4ec9b0;
+                padding: 5px;
+            }
+        """)
+        tokens_layout.addWidget(header_label)
+        
+        # Info label
+        info_label = QLabel("Words/tokens extracted from your input file. Copy these to feed to an AI provider manually if your API quota is reached.")
+        info_label.setStyleSheet("""
+            QLabel {
+                color: #d4d4d4;
+                font-size: 9pt;
+                padding: 5px;
+            }
+        """)
+        info_label.setWordWrap(True)
+        tokens_layout.addWidget(info_label)
+        
+        # Text edit for tokens (read-only, but allows selection and copying)
+        self.tokens_text = QTextEdit()
+        self.tokens_text.setReadOnly(True)
+        self.tokens_text.setPlaceholderText("No tokens available. Process a vocabulary file or check for new words to see tokens here.")
+        self.tokens_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e42;
+                border-radius: 4px;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11pt;
+                selection-background-color: #094771;
+            }
+        """)
+        tokens_layout.addWidget(self.tokens_text)
+        
+        # Buttons layout
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+        
+        # Copy all button
+        copy_button = QPushButton("📋 Copy All")
+        copy_button.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QPushButton:pressed {
+                background-color: #0a4d75;
+            }
+        """)
+        copy_button.clicked.connect(self.copy_all_tokens)
+        buttons_layout.addWidget(copy_button)
+        
+        tokens_layout.addLayout(buttons_layout)
+        
+        return tokens_widget
+    
+    def extract_tokens_from_file(self, file_path: str) -> list:
+        """Extract words/tokens from an input file for display in Tokens Panel."""
+        try:
+            loader = VocabularyLoader()
+            # Use load_file with fetch_pronunciations=False to speed up token extraction
+            words = loader.load_file(file_path, fetch_pronunciations=False)
+            return words
+        except Exception as e:
+            print(f"Error extracting tokens: {e}")
+            return []
+    
+    def update_tokens_panel(self, words: list, is_check_new: bool = False, examples_per_word: int = 1):
+        """Update the Tokens Panel with extracted words/tokens.
+        
+        Args:
+            words: List of words/tokens to display
+            is_check_new: If True, format for check-new (with Google AI Studio prompt template)
+            examples_per_word: Number of examples per word (used in prompt template)
+        """
+        if not words:
+            self.tokens_text.setPlainText("No tokens found.")
+            return
+        
+        words_list = [word for word in words if word.strip()]
+        
+        if is_check_new:
+            # For check-new, format with Google AI Studio prompt template
+            self._update_tokens_panel_for_google_ai(words_list, examples_per_word)
+        else:
+            # Regular format: multiple formats for convenience
+            # Format 1: One word per line (easy to copy individual words)
+            per_line_format = "\n".join(words_list)
+            
+            # Format 2: Comma-separated (easy to paste into prompts)
+            comma_format = ", ".join(words_list)
+            
+            # Format 3: Python list format
+            python_list_format = "[" + ", ".join([f'"{word}"' for word in words_list]) + "]"
+            
+            # Format 4: JSON array format
+            import json
+            json_format = json.dumps(words_list, indent=2)
+            
+            # Combine all formats with separators
+            tokens_content = f"""=== One word per line (copy individual words) ===
+
+{per_line_format}
+
+
+=== Comma-separated (paste into AI prompts) ===
+
+{comma_format}
+
+
+=== Python list format ===
+
+{python_list_format}
+
+
+=== JSON array format ===
+
+{json_format}
+
+
+=== Summary ===
+Total tokens: {len(words_list)}
+"""
+            self.tokens_text.setPlainText(tokens_content)
+        
+        # Switch to Tokens Panel tab automatically
+        self.tab_widget.setCurrentIndex(2)  # Tokens Panel is the 3rd tab (index 2)
+    
+    def _update_tokens_panel_for_google_ai(self, words: list, examples_per_word: int):
+        """Format tokens with Google AI Studio prompt template for manual AI input."""
+        if not words:
+            self.tokens_text.setPlainText("No new tokens found.")
+            return
+        
+        # Build prompt template based on the template in english_learner.py lines 1096-1120
+        # Format for Google AI Studio - can be copied directly
+        word_list_str = ", ".join([f'"{word}"' for word in words])
+        
+        # Create numbered word list for the prompt
+        numbered_words = "\n".join([f"{i+1}. {word}" for i, word in enumerate(words)])
+        
+        # Build examples section template based on examples_per_word (NO numbering for examples)
+        examples_template = ""
+        for i in range(examples_per_word):
+            examples_template += "[Example sentence showing how native speakers use this word in their daily life - naturally USED in context, not just mentioned]\n"
+        examples_template = examples_template.rstrip()
+        
+        # Create the prompt template
+        prompt_template = f"""Provide a dictionary definition (like Oxford or Google Dictionary) and {examples_per_word} example sentence(s) for each of these vocabulary words: {word_list_str}.
+
+Requirements:
+- For EACH word, provide an EXPLANATION that is a proper dictionary definition in the style of Oxford or Google Dictionary
+- Each definition should be clear, precise, and explain what the word means
+- **CRITICAL FOR EXAMPLES**: Each EXAMPLE must show how native English speakers use this word in their DAILY LIFE - in real conversations, everyday situations, and natural speech
+- Each EXAMPLE must be a REALISTIC example of how US English native speakers actually USE the word in daily conversations and everyday life
+- Examples should reflect how people actually talk in real life - at work, with friends, in stores, at home, etc.
+- CRITICAL: Each word must be USED NATURALLY in its example sentence, not just mentioned or talked about
+- Examples should demonstrate the word being actively used in context - like "The poverty-stricken neighborhood needs help" NOT "She's talking about poverty-stricken"
+- Examples should sound like actual dialogue from TV shows (like Friends, The Office, Breaking Bad), movies, or real everyday conversations
+- Make examples natural and conversational - like something a real person would say in casual conversation during their daily life
+- Use contractions, casual language, and natural speech patterns when appropriate
+- Each example should show the word being used as it would naturally appear in speech or writing in daily life situations
+- DO NOT create examples where someone is just mentioning or discussing the word - the word must be actively used in a real daily life context
+
+After providing the explanations and examples, also create fill-in-the-blank test questions for each word based on the example sentences. For each test question:
+- Create a sentence with a blank (_____) where the word should go
+- Provide the answer (the word itself)
+- Provide the full original sentence
+
+CRITICAL FORMATTING REQUIREMENTS:
+1. Use periods (.) NOT commas (,) for ALL numbering - this is very important!
+2. First, provide ALL word explanations and examples in one block (words numbered 1, 2, 3, etc. using PERIODS)
+3. Examples should NOT have numbers - just list them one per line without numbering
+4. Then, provide ALL tests in a separate block (numbered 1, 2, 3, etc. using PERIODS) - but the test order should be DIFFERENT from the word order (shuffled/randomized)
+5. Finally, provide ALL answers in a separate block (numbered 1, 2, 3, etc. using PERIODS) matching the test order
+
+Format your response EXACTLY as follows (use PERIODS (.) for numbering, NOT commas (,)):
+
+=== SECTION 1: WORD EXPLANATIONS AND EXAMPLES ===
+
+1. WORD: word1
+EXPLANATION:
+[Dictionary definition of "word1"]
+
+EXAMPLES:
+{examples_template}
+
+2. WORD: word2
+EXPLANATION:
+[Dictionary definition of "word2"]
+
+EXAMPLES:
+{examples_template}
+
+[Continue for all words in order 1, 2, 3, ... - use PERIODS (.) not commas (,) for numbering]
+
+=== SECTION 2: TESTS (IN DIFFERENT ORDER) ===
+
+1. Question: [Sentence with _____ where a word should go]
+Full sentence: [The complete original sentence]
+
+2. Question: [Sentence with _____ where a word should go]
+Full sentence: [The complete original sentence]
+
+[Continue for all tests - order should be DIFFERENT from the word order above - use PERIODS (.) not commas (,) for numbering]
+
+=== SECTION 3: ANSWERS (MATCHING TEST ORDER) ===
+
+1. Answer: [word]
+2. Answer: [word]
+[Continue for all answers in the same order as the tests - use PERIODS (.) not commas (,) for numbering]
+
+REMINDER: 
+- Use periods (.) for word numbering, NOT commas (,)
+- Examples should NOT have numbers - just list them one per line without any numbering
+- Word numbering: 1. WORD:, 2. WORD:, 3. WORD: (with periods)
+- Examples format: [example sentence] (no numbering, just one per line)
+
+Words to process ({len(words)} total):
+{numbered_words}
+"""
+        
+        self.tokens_text.setPlainText(prompt_template)
+    
+    def copy_all_tokens(self):
+        """Copy all tokens to clipboard."""
+        text = self.tokens_text.toPlainText()
+        if text:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            self._show_status("Tokens copied to clipboard", "success", 2000)
+        else:
+            self._show_status("No tokens to copy", "warning", 2000)
     
     def create_results_panel(self):
         """Create the results panel tab with navigation and viewer."""
@@ -1222,6 +1502,15 @@ class EnglishLearnerGUI(QMainWindow):
             # Display multiple files separated by semicolon
             file_list = "; ".join(filenames)
             self.input_file_edit.setText(file_list)
+            
+            # Update tracker file path based on first input file's directory
+            if filenames and len(filenames) > 0:
+                first_file_path = filenames[0]
+                input_dir = os.path.dirname(first_file_path)
+                tracker_file_path = os.path.join(input_dir, "processed_words.json")
+                self.tracker_file_path = tracker_file_path
+                self.tracker_label.setText(tracker_file_path)
+            
             if len(filenames) > 1:
                 self._show_status(f"Selected {len(filenames)} files", "success", timeout=3000)
             
@@ -1778,6 +2067,32 @@ class EnglishLearnerGUI(QMainWindow):
             QMessageBox.critical(self, "Error", "No valid input files found.")
             return
         
+        # Update tracker file path based on first input file's directory
+        if valid_paths and len(valid_paths) > 0:
+            first_file_path = valid_paths[0]
+            input_dir = os.path.dirname(first_file_path)
+            tracker_file_path = os.path.join(input_dir, "processed_words.json")
+            self.tracker_file_path = tracker_file_path
+            self.tracker_label.setText(tracker_file_path)
+            
+            # Extract and display tokens before processing
+            try:
+                all_tokens = []
+                for file_path in valid_paths:
+                    tokens = self.extract_tokens_from_file(file_path)
+                    all_tokens.extend(tokens)
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_tokens = []
+                for token in all_tokens:
+                    if token not in seen:
+                        seen.add(token)
+                        unique_tokens.append(token)
+                if unique_tokens:
+                    self.update_tokens_panel(unique_tokens)
+            except Exception as e:
+                print(f"Warning: Could not extract tokens: {e}")
+        
         # Determine output file
         output_path = self.output_file_edit.text().strip()
         if not output_path:
@@ -1803,6 +2118,18 @@ class EnglishLearnerGUI(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
         
+        # Get AI provider from combo box
+        provider_map = {
+            0: "google",
+            1: "openai",
+            2: "deepseek",
+            3: "anthropic"
+        }
+        ai_provider = provider_map.get(self.ai_provider_combo.currentIndex(), "google")
+        
+        # Get batch processing setting
+        use_batch = self.use_batch_checkbox.isChecked()
+        
         # Start processing thread
         self.processing_thread = ProcessingThread(
             valid_paths,  # Pass list of files
@@ -1811,7 +2138,9 @@ class EnglishLearnerGUI(QMainWindow):
             self.test_batch_spin.value(),
             self.words_section_spin.value(),
             True,  # Always track new words (checkbox removed - use "Check New Words" button for new words only)
-            self.tracker_file_path
+            None,  # Pass None to use same directory as input file
+            ai_provider=ai_provider,
+            use_batch=use_batch
         )
         self.processing_thread.progress.connect(self.on_progress)
         self.processing_thread.finished.connect(self.on_finished)
@@ -1961,6 +2290,42 @@ class EnglishLearnerGUI(QMainWindow):
             QMessageBox.critical(self, "Error", "No valid input files found.")
             return
         
+        # Extract and display ONLY NEW tokens for check-new
+        try:
+            # Get tracker file path based on first input file's directory
+            if valid_paths and len(valid_paths) > 0:
+                first_file_path = valid_paths[0]
+                input_dir = os.path.dirname(first_file_path)
+                tracker_file_path = os.path.join(input_dir, "processed_words.json")
+                
+                # Load all words from files
+                all_tokens = []
+                for file_path in valid_paths:
+                    tokens = self.extract_tokens_from_file(file_path)
+                    all_tokens.extend(tokens)
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_tokens = []
+                for token in all_tokens:
+                    if token not in seen:
+                        seen.add(token)
+                        unique_tokens.append(token)
+                
+                # Get only NEW words using WordTracker
+                tracker = WordTracker(tracker_file_path)
+                new_words, duplicate_words = tracker.get_new_words(unique_tokens)
+                
+                if new_words:
+                    # Format for Google AI Studio with prompt template
+                    examples_per_word = self.examples_spin.value()
+                    self.update_tokens_panel(new_words, is_check_new=True, examples_per_word=examples_per_word)
+                else:
+                    self.tokens_text.setPlainText("No new tokens found. All words have already been processed.")
+                    # Still switch to tokens panel to show this message
+                    self.tab_widget.setCurrentIndex(2)
+        except Exception as e:
+            print(f"Warning: Could not extract new tokens: {e}")
+        
         # Determine output file - generate full path in Documents directory
         output_path = self.output_file_edit.text().strip()
         if not output_path:
@@ -1985,6 +2350,18 @@ class EnglishLearnerGUI(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
         
+        # Get AI provider from combo box
+        provider_map = {
+            0: "google",
+            1: "openai",
+            2: "deepseek",
+            3: "anthropic"
+        }
+        ai_provider = provider_map.get(self.ai_provider_combo.currentIndex(), "google")
+        
+        # Get batch processing setting
+        use_batch = self.use_batch_checkbox.isChecked()
+        
         # Start processing thread
         self.processing_thread = CheckNewThread(
             valid_paths,  # Pass list of files
@@ -1992,7 +2369,9 @@ class EnglishLearnerGUI(QMainWindow):
             self.examples_spin.value(),
             self.test_batch_spin.value(),
             self.words_section_spin.value(),
-            self.tracker_file_path
+            None,  # Pass None to use same directory as input file
+            ai_provider=ai_provider,
+            use_batch=use_batch
         )
         self.processing_thread.progress.connect(self.on_progress)
         self.processing_thread.finished.connect(self.on_check_new_finished)
@@ -2043,9 +2422,39 @@ class EnglishLearnerGUI(QMainWindow):
         if reply != QMessageBox.Yes:
             return
             
+        # Get tracker file path from current input file selection
+        input_text = self.input_file_edit.text().strip()
+        if not input_text:
+            QMessageBox.critical(self, "Error", "Please select input file(s) first to determine tracker file location.")
+            return
+        
+        # Parse first file path
+        input_paths = [path.strip() for path in input_text.split(';') if path.strip()]
+        if not input_paths:
+            QMessageBox.critical(self, "Error", "No valid input files specified.")
+            return
+        
+        # Helper function to find file with extensions
+        def find_file(file_path):
+            if os.path.exists(file_path):
+                return file_path
+            extensions = ['', '.html', '.htm', '.txt', '.md']
+            for ext in extensions:
+                test_path = file_path + ext
+                if os.path.exists(test_path):
+                    return test_path
+            return None
+        
+        first_file_path = find_file(input_paths[0])
+        if not first_file_path:
+            QMessageBox.critical(self, "Error", f"Input file not found: {input_paths[0]}")
+            return
+        
+        # Determine tracker file path based on input file directory
+        input_dir = os.path.dirname(first_file_path)
+        tracker_file = os.path.join(input_dir, "processed_words.json")
+        
         try:
-            tracker_file = self.tracker_file_path
-            
             # Use shared function
             result = clear_word_tracker(tracker_file, skip_confirmation=True)
             

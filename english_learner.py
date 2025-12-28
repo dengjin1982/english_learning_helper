@@ -470,115 +470,96 @@ class VocabularyLoader:
         return unique_words
 
 
-class SentenceGenerator:
-    """Generates native speaker sentences using Google AI."""
-
+class AIProvider:
+    """Base class for AI providers."""
+    
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv('GOOGLE_API_KEY')
+        self.api_key = api_key
         self.use_mock = False
+    
+    def generate_content(self, prompt: str) -> str:
+        """Generate content from a prompt. Must be implemented by subclasses."""
+        raise NotImplementedError("Subclasses must implement generate_content")
+    
+    def get_name(self) -> str:
+        """Return the name of the provider. Must be implemented by subclasses."""
+        raise NotImplementedError("Subclasses must implement get_name")
+
+
+class GoogleAIProvider(AIProvider):
+    """Google AI (Gemini) provider."""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__(api_key or os.getenv('GOOGLE_API_KEY'))
         self.model = None
         self.models = []  # Store multiple models to try
-
+        
         if not self.api_key:
-            console.print("[yellow][WARN] No Google API key found. Using mock sentence generation.[/yellow]")
-            console.print("[dim]To use Google AI (Gemini) for realistic sentence generation:[/dim]")
-            console.print("[dim]1. Get a free API key from: https://makersuite.google.com/app/apikey[/dim]")
-            console.print("[dim]2. Create a .env file in the project directory with: GOOGLE_API_KEY=your_key_here[/dim]")
             self.use_mock = True
-        else:
-            try:
-                # Lazy import to avoid compatibility issues with Python 3.14
-                global genai
-                if genai is None:
-                    # Suppress deprecation warnings
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", category=FutureWarning)
-                        try:
-                            import google.generativeai as genai
-                        except TypeError as te:
-                            # Python 3.14 metaclass issue
-                            error_msg = str(te)
-                            if "Metaclasses with custom tp_new" in error_msg or "metaclass" in error_msg.lower():
-                                raise ImportError("Python 3.14 compatibility issue with google-generativeai. Please use Python 3.11 or 3.12, or use mock mode.")
-                            raise
-                        except Exception as import_error:
-                            # Catch any other import errors
-                            error_msg = str(import_error)
-                            if "Metaclasses with custom tp_new" in error_msg or "metaclass" in error_msg.lower():
-                                raise ImportError("Python 3.14 compatibility issue with google-generativeai. Please use Python 3.11 or 3.12, or use mock mode.")
-                            raise
-                
-                # Suppress deprecation warnings during configuration
+            return
+        
+        try:
+            global genai
+            if genai is None:
                 import warnings
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=FutureWarning)
-                    genai.configure(api_key=self.api_key)
-                
-                # Use gemini-pro as it's the most stable and widely supported model
-                # gemini-1.5-flash and gemini-1.5-pro may have API version compatibility issues
-                model_names = ['gemini-pro']
-                
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=FutureWarning)
-                    for model_name in model_names:
-                        try:
-                            model = genai.GenerativeModel(model_name)
-                            self.models.append(model)
-                            if self.model is None:
-                                self.model = model
-                                console.print(f"[green][OK] Using Google AI model: {model_name}[/green]")
-                        except Exception as model_error:
-                            # Check for metaclass error specifically
-                            error_msg = str(model_error)
-                            if "Metaclasses with custom tp_new" in error_msg or "metaclass" in error_msg.lower():
-                                raise ImportError("Python 3.14 compatibility issue with google-generativeai. Please use Python 3.11 or 3.12, or use mock mode.")
-                            # Continue trying other models
-                            continue
-                
-                if self.model is None or len(self.models) == 0:
-                    raise Exception("Could not initialize any Google AI model")
-                
-                if len(self.models) > 1:
-                    console.print(f"[dim]Initialized {len(self.models)} models for fallback[/dim]")
-                    
-            except ImportError as ie:
-                console.print(f"[yellow][WARN] Import error: {ie}[/yellow]")
-                console.print("[yellow]Using mock sentence generation instead.[/yellow]")
-                console.print("[dim]Tip: For Python 3.14, consider using Python 3.11 or 3.12 for full Google AI support.[/dim]")
+                    try:
+                        import google.generativeai as genai
+                    except Exception as import_error:
+                        error_msg = str(import_error)
+                        if "Metaclasses with custom tp_new" in error_msg or "metaclass" in error_msg.lower():
+                            raise ImportError("Python 3.14 compatibility issue with google-generativeai.")
+                        raise
+            
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                genai.configure(api_key=self.api_key)
+            
+            model_names = [
+                'models/gemini-2.5-flash',
+                'models/gemini-2.5-pro',
+                'models/gemini-flash-latest',
+                'models/gemini-pro-latest',
+                'models/gemini-2.0-flash',
+                'models/gemini-2.0-flash-001'
+            ]
+            
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                for model_name in model_names:
+                    try:
+                        model = genai.GenerativeModel(model_name)
+                        self.models.append(model)
+                        if self.model is None:
+                            self.model = model
+                            console.print(f"[green][OK] Using Google AI model: {model_name}[/green]")
+                    except Exception:
+                        continue
+            
+            if self.model is None or len(self.models) == 0:
                 self.use_mock = True
-            except Exception as e:
-                error_msg = str(e)
-                if "Metaclasses with custom tp_new" in error_msg or "metaclass" in error_msg.lower():
-                    console.print(f"[yellow][WARN] Python 3.14 compatibility issue with google-generativeai[/yellow]")
-                    console.print("[yellow]Using mock sentence generation instead.[/yellow]")
-                    console.print("[dim]Tip: Consider using Python 3.11 or 3.12 for full Google AI support.[/dim]")
-                    console.print(f"[dim]Error details: {error_msg}[/dim]")
-                else:
-                    console.print(f"[yellow][WARN] Failed to initialize Google AI: {e}[/yellow]")
-                    console.print("[yellow]Using mock sentence generation instead.[/yellow]")
-                self.use_mock = True
-
-    def _try_generate_content(self, prompt: str) -> str:
-        """Try to generate content using available models, retrying with alternatives on 404 errors."""
-        if not self.models:
-            raise Exception("No models available")
+                return
+                
+        except Exception as e:
+            console.print(f"[yellow][WARN] Failed to initialize Google AI: {e}[/yellow]")
+            self.use_mock = True
+    
+    def generate_content(self, prompt: str) -> str:
+        """Generate content using Google AI."""
+        if self.use_mock or not self.models:
+            raise Exception("Google AI not available")
         
         last_error = None
-        models_tried = []
-        
         for idx, model in enumerate(self.models):
             try:
                 response = model.generate_content(prompt)
-                # Handle different response structures
                 text = None
                 if response:
-                    # Try to get text from response
                     if hasattr(response, 'text') and response.text:
                         text = response.text
                     elif hasattr(response, 'candidates') and response.candidates:
-                        # Sometimes response structure is different
                         candidate = response.candidates[0]
                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                             text = ''.join(part.text for part in candidate.content.parts if hasattr(part, 'text'))
@@ -586,45 +567,243 @@ class SentenceGenerator:
                             text = candidate.text
                 
                 if text:
-                    # If this model worked but wasn't the primary, switch to it
                     if model != self.model:
                         self.model = model
-                        # Also update models list to prioritize this working model
                         self.models.insert(0, self.models.pop(idx))
                     return text
                 else:
-                    # Response exists but no text - this is unusual
-                    raise Exception(f"Google AI returned response but no text content. Response: {type(response)}")
+                    raise Exception(f"Google AI returned response but no text content")
             except Exception as e:
                 error_msg = str(e)
-                last_error = e
-                models_tried.append(f"model_{idx}")
-                
-                # Check if it's a 404, model not found, or API version error
                 is_404_error = (
                     "404" in error_msg or 
                     "not found" in error_msg.lower() or 
                     "not supported" in error_msg.lower() or
                     "v1beta" in error_msg.lower() or
-                    "api version" in error_msg.lower()
+                    "api version" in error_msg.lower() or
+                    "429" in error_msg or
+                    "quota" in error_msg.lower()
                 )
                 
-                # If it's a 404/model error and we have more models to try, continue
                 if is_404_error and idx < len(self.models) - 1:
                     continue
-                # If it's not a 404 error, raise immediately
                 if not is_404_error:
                     raise
-                # If it's the last model and it's a 404, we'll raise after the loop
+                last_error = e
         
-        # If all models failed with 404, raise the last error
         if last_error:
-            error_msg = str(last_error)
-            # Provide a more helpful error message
-            if "v1beta" in error_msg.lower():
-                raise Exception(f"All models failed. The API may require a different model name or API version. Last error: {error_msg}")
             raise last_error
         raise Exception("Failed to generate content with any available model")
+    
+    def get_name(self) -> str:
+        return "Google AI (Gemini)"
+
+
+class OpenAIProvider(AIProvider):
+    """OpenAI (ChatGPT) provider."""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__(api_key or os.getenv('OPENAI_API_KEY'))
+        self.client = None
+        self.model_name = "gpt-4o-mini"  # Use cheaper model by default
+        
+        if not self.api_key:
+            self.use_mock = True
+            console.print("[yellow][WARN] No OpenAI API key found. Set OPENAI_API_KEY in .env file[/yellow]")
+            return
+        
+        try:
+            try:
+                from openai import OpenAI
+            except ImportError:
+                console.print("[yellow][WARN] openai package not installed. Install with: pip install openai[/yellow]")
+                self.use_mock = True
+                return
+            
+            self.client = OpenAI(api_key=self.api_key)
+            console.print(f"[green][OK] Using OpenAI provider with model: {self.model_name}[/green]")
+        except Exception as e:
+            console.print(f"[yellow][WARN] Failed to initialize OpenAI: {e}[/yellow]")
+            self.use_mock = True
+    
+    def generate_content(self, prompt: str) -> str:
+        """Generate content using OpenAI."""
+        if self.use_mock or not self.client:
+            raise Exception("OpenAI not available")
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                raise Exception(f"OpenAI rate limit/quota exceeded: {error_msg[:200]}")
+            raise
+    
+    def get_name(self) -> str:
+        return "OpenAI (ChatGPT)"
+
+
+class DeepSeekProvider(AIProvider):
+    """DeepSeek AI provider."""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__(api_key or os.getenv('DEEPSEEK_API_KEY'))
+        self.client = None
+        self.model_name = "deepseek-chat"  # Default DeepSeek model
+        self.base_url = "https://api.deepseek.com"
+        
+        if not self.api_key:
+            self.use_mock = True
+            console.print("[yellow][WARN] No DeepSeek API key found. Set DEEPSEEK_API_KEY in .env file[/yellow]")
+            return
+        
+        try:
+            try:
+                from openai import OpenAI
+            except ImportError:
+                console.print("[yellow][WARN] openai package not installed. Install with: pip install openai[/yellow]")
+                self.use_mock = True
+                return
+            
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            console.print(f"[green][OK] Using DeepSeek provider with model: {self.model_name}[/green]")
+        except Exception as e:
+            console.print(f"[yellow][WARN] Failed to initialize DeepSeek: {e}[/yellow]")
+            self.use_mock = True
+    
+    def generate_content(self, prompt: str) -> str:
+        """Generate content using DeepSeek."""
+        if self.use_mock or not self.client:
+            raise Exception("DeepSeek not available")
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            error_msg = str(e)
+            error_str_lower = error_msg.lower()
+            
+            # Check for insufficient balance (402 error)
+            if "402" in error_msg or "insufficient balance" in error_str_lower or "insufficient_balance" in error_str_lower:
+                raise Exception(f"DeepSeek insufficient balance. Please add credits to your DeepSeek account. Error: {error_msg[:200]}")
+            
+            # Check for rate limit/quota errors
+            if "429" in error_msg or "quota" in error_str_lower or "rate limit" in error_str_lower:
+                raise Exception(f"DeepSeek rate limit/quota exceeded: {error_msg[:200]}")
+            
+            raise
+    
+    def get_name(self) -> str:
+        return "DeepSeek"
+
+
+class AnthropicProvider(AIProvider):
+    """Anthropic (Claude) provider."""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        super().__init__(api_key or os.getenv('ANTHROPIC_API_KEY'))
+        self.client = None
+        self.model_name = "claude-3-5-sonnet-20241022"  # Latest Claude model
+        
+        if not self.api_key:
+            self.use_mock = True
+            console.print("[yellow][WARN] No Anthropic API key found. Set ANTHROPIC_API_KEY in .env file[/yellow]")
+            return
+        
+        try:
+            try:
+                import anthropic
+            except ImportError:
+                console.print("[yellow][WARN] anthropic package not installed. Install with: pip install anthropic[/yellow]")
+                self.use_mock = True
+                return
+            
+            self.client = anthropic.Anthropic(api_key=self.api_key)
+            console.print(f"[green][OK] Using Anthropic (Claude) provider with model: {self.model_name}[/green]")
+        except Exception as e:
+            console.print(f"[yellow][WARN] Failed to initialize Anthropic: {e}[/yellow]")
+            self.use_mock = True
+    
+    def generate_content(self, prompt: str) -> str:
+        """Generate content using Anthropic Claude."""
+        if self.use_mock or not self.client:
+            raise Exception("Anthropic not available")
+        
+        try:
+            message = self.client.messages.create(
+                model=self.model_name,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return message.content[0].text
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                raise Exception(f"Anthropic rate limit/quota exceeded: {error_msg[:200]}")
+            raise
+    
+    def get_name(self) -> str:
+        return "Anthropic (Claude)"
+
+
+def create_ai_provider(provider_name: str = "google") -> AIProvider:
+    """Factory function to create an AI provider based on name."""
+    provider_name = provider_name.lower()
+    
+    if provider_name in ["google", "gemini", "google-ai"]:
+        return GoogleAIProvider()
+    elif provider_name in ["openai", "chatgpt", "gpt"]:
+        return OpenAIProvider()
+    elif provider_name in ["deepseek", "deep-seek"]:
+        return DeepSeekProvider()
+    elif provider_name in ["anthropic", "claude"]:
+        return AnthropicProvider()
+    else:
+        console.print(f"[yellow][WARN] Unknown AI provider '{provider_name}', falling back to Google AI[/yellow]")
+        return GoogleAIProvider()
+
+
+class SentenceGenerator:
+    """Generates native speaker sentences using AI providers."""
+
+    def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None):
+        self.provider_name = provider or os.getenv('AI_PROVIDER', 'google').lower()
+        self.ai_provider = create_ai_provider(self.provider_name)
+        self.use_mock = self.ai_provider.use_mock
+        
+        if self.use_mock:
+            console.print(f"[yellow][WARN] {self.ai_provider.get_name()} not available. Using mock sentence generation.[/yellow]")
+
+    def _try_generate_content(self, prompt: str) -> str:
+        """Try to generate content using the AI provider."""
+        if self.use_mock:
+            raise Exception("AI provider not available (mock mode)")
+        
+        try:
+            return self.ai_provider.generate_content(prompt)
+        except Exception as e:
+            error_msg = str(e)
+            error_str_lower = error_msg.lower()
+            provider_name = self.ai_provider.get_name()
+            
+            # Check for insufficient balance errors (402)
+            if "402" in error_msg or ("insufficient" in error_str_lower and ("balance" in error_str_lower or "credit" in error_str_lower)):
+                raise Exception(f"{provider_name} insufficient balance/credits. Please add credits to your account or switch to another provider. Error: {error_msg[:200]}")
+            
+            # Check for quota/rate limit errors (429)
+            if "429" in error_msg or "quota" in error_str_lower or "rate limit" in error_str_lower:
+                raise Exception(f"{provider_name} quota/rate limit exceeded. Please wait or switch to another provider. Error: {error_msg[:200]}")
+            
+            raise
 
     def generate_explanation_and_examples(self, word: str, num_examples: int = 1, is_repeat: bool = False) -> Dict[str, str]:
         """
@@ -642,11 +821,13 @@ class SentenceGenerator:
         
         if self.use_mock:
             if debug_enabled:
-                console.print(f"[yellow][DEBUG] Using MOCK mode for '{word}' (Google AI not available)[/yellow]")
+                provider_name = self.ai_provider.get_name()
+                console.print(f"[yellow][DEBUG] Using MOCK mode for '{word}' ({provider_name} not available)[/yellow]")
             return self._generate_mock_explanation_and_examples(word, num_examples, is_repeat)
         else:
             if debug_enabled:
-                console.print(f"[cyan][DEBUG] Using Google AI for '{word}'[/cyan]")
+                provider_name = self.ai_provider.get_name()
+                console.print(f"[cyan][DEBUG] Using {provider_name} for '{word}'[/cyan]")
             return self._generate_ai_explanation_and_examples(word, num_examples, is_repeat)
 
     def generate_sentences(self, words: List[str], num_sentences: int = 3) -> Dict[str, List[str]]:
@@ -703,12 +884,209 @@ class SentenceGenerator:
         text = self._try_generate_content(prompt)
         return self._parse_sentences(text)
 
-    def _generate_ai_explanation_and_examples(self, word: str, num_examples: int, is_repeat: bool = False) -> Dict[str, str]:
-        """Generate explanation and examples using Google AI."""
-        # Debug: Check if we're actually using Google AI
+    def _generate_ai_explanation_and_examples_batch(self, words: List[tuple], num_examples: int) -> Dict[str, Dict[str, str]]:
+        """Generate explanations and examples for multiple words in a single Google AI call.
+        
+        Args:
+            words: List of tuples (word, is_repeat) where is_repeat indicates if word appeared before
+            num_examples: Number of example sentences per word
+            
+        Returns:
+            Dictionary mapping word -> {explanation, examples, pronunciation}
+        """
+        if not words:
+            return {}
+        
         debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
         if debug_enabled:
-            console.print(f"[cyan][DEBUG] Calling Google AI for '{word}'...[/cyan]")
+            word_list = [w[0] for w in words]
+            provider_name = self.ai_provider.get_name()
+            console.print(f"[cyan][DEBUG] Batch calling {provider_name} for {len(words)} words: {', '.join(word_list[:5])}{'...' if len(words) > 5 else ''}[/cyan]")
+        
+        # Build batch prompt
+        word_list_str = ', '.join([f'"{w[0]}"' for w in words])
+        repeat_words = [w[0] for w in words if w[1]]  # Words that are repeats
+        repeat_note = ""
+        if repeat_words:
+            repeat_note = f"\n        IMPORTANT: The following words appeared in previous learning sessions and need DIFFERENT examples: {', '.join(repeat_words)}. Provide completely different contexts or situations for these words."
+        
+        prompt = f"""
+        Provide dictionary definitions (like Oxford or Google Dictionary) and {num_examples} example sentence(s) for each of these vocabulary words: {word_list_str}.
+
+        Requirements:
+        - For EACH word, provide an EXPLANATION that is a proper dictionary definition in the style of Oxford or Google Dictionary
+        - Each definition should be clear, precise, and explain what the word means
+        - Each EXAMPLE must be a REALISTIC example of how US English native speakers actually USE the word in daily conversations
+        - CRITICAL: Each word must be USED NATURALLY in its example sentence, not just mentioned or talked about
+        - Examples should demonstrate the word being actively used in context - like "The poverty-stricken neighborhood needs help" NOT "She's talking about poverty-stricken"
+        - Examples should sound like actual dialogue from TV shows (like Friends, The Office, Breaking Bad), movies, or real everyday conversations
+        - Make examples natural and conversational - like something a real person would say in casual conversation
+        - Use contractions, casual language, and natural speech patterns when appropriate
+        - Each example should show the word being used as it would naturally appear in speech or writing
+        - DO NOT create examples where someone is just mentioning or discussing the word - the word must be actively used{repeat_note}
+
+        Format your response exactly as follows (one entry per word):
+
+        WORD: word1
+        EXPLANATION:
+        [Dictionary definition of "word1"]
+
+        EXAMPLES:
+        1. [One realistic conversational example where "word1" is naturally USED in context - not just mentioned]
+
+        WORD: word2
+        EXPLANATION:
+        [Dictionary definition of "word2"]
+
+        EXAMPLES:
+        1. [One realistic conversational example where "word2" is naturally USED in context - not just mentioned]
+
+        [Continue for all words...]
+        """
+        
+        try:
+            try:
+                text = self._try_generate_content(prompt)
+            except Exception as api_error:
+                error_msg = str(api_error)
+                # If all models failed with 404, provide better error message
+                if "404" in error_msg and "not found" in error_msg.lower():
+                    debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
+                    if debug_enabled:
+                        provider_name = self.ai_provider.get_name()
+                        console.print(f"[red][DEBUG] Batch {provider_name} failed: All models unavailable. Error: {error_msg[:200]}[/red]")
+                    # Return empty dict to trigger fallback to individual processing
+                    return {}
+                # Re-raise other errors
+                raise
+            
+            if not text or len(text.strip()) == 0:
+                raise Exception("Google AI returned empty response")
+            
+            # Parse batch response
+            results = {}
+            current_word = None
+            current_data = {}
+            lines = text.split('\n')
+            in_explanation = False
+            in_examples = False
+            
+            for line in lines:
+                line = line.strip()
+                line_upper = line.upper()
+                
+                # Check for WORD: header
+                if line_upper.startswith('WORD:'):
+                    # Save previous word if exists
+                    if current_word and current_data:
+                        results[current_word] = current_data
+                    
+                    # Start new word
+                    current_word = line.replace('WORD:', '').strip().strip('"').strip("'")
+                    current_data = {'explanation': '', 'examples': []}
+                    in_explanation = False
+                    in_examples = False
+                    continue
+                
+                # Check for EXPLANATION: header
+                if 'EXPLANATION:' in line_upper or 'DEFINITION:' in line_upper:
+                    in_explanation = True
+                    in_examples = False
+                    explanation_text = re.sub(r'^(EXPLANATION|DEFINITION)[:\s]*', '', line, flags=re.IGNORECASE).strip()
+                    if explanation_text:
+                        current_data['explanation'] = explanation_text
+                    continue
+                
+                # Check for EXAMPLES: header
+                if 'EXAMPLES:' in line_upper or 'EXAMPLE:' in line_upper:
+                    in_explanation = False
+                    in_examples = True
+                    continue
+                
+                # Collect explanation text
+                if in_explanation and line and current_word:
+                    if line in ['---', '---', '='] or not line:
+                        continue
+                    if re.match(r'^\d+[\.\)]\s+', line) or line.startswith('•') or line.startswith('-'):
+                        in_explanation = False
+                        in_examples = True
+                        continue
+                    if current_data['explanation']:
+                        current_data['explanation'] += " " + line
+                    else:
+                        current_data['explanation'] = line
+                
+                # Collect example text
+                elif in_examples and line and current_word:
+                    line = re.sub(r'^\d+[\.\)]\s*', '', line)
+                    if line and line not in ['---', '---', '=']:
+                        current_data['examples'].append(line)
+            
+            # Save last word
+            if current_word and current_data:
+                results[current_word] = current_data
+            
+            # Post-process each result (similar to single word processing)
+            for word, is_repeat in words:
+                word_lower = word.lower()
+                if word_lower not in results:
+                    # Word not found in batch response - try to find it
+                    # Look for word in text (case-insensitive)
+                    word_pattern = rf'\b{re.escape(word)}\b'
+                    if re.search(word_pattern, text, re.IGNORECASE):
+                        # Word mentioned but not properly formatted - try to extract
+                        # This is a fallback, results might be incomplete
+                        results[word_lower] = {'explanation': '', 'examples': []}
+                
+                data = results.get(word_lower, {'explanation': '', 'examples': []})
+                
+                # Apply same parsing fallbacks as single word processing
+                explanation = data.get('explanation', '').strip()
+                if not explanation or len(explanation) < 10:
+                    # Try to extract from raw text using same logic as single word
+                    text_lower = text.lower()
+                    # Look for patterns
+                    definition_patterns = [
+                        rf'{re.escape(word_lower)}\s+(?:is|means|refers to|denotes|describes)\s+([^\.]+(?:\.[^\.]+)*)',
+                        rf'{re.escape(word_lower)}\s*:\s*([^\.]+(?:\.[^\.]+)*)',
+                    ]
+                    for pattern in definition_patterns:
+                        matches = re.finditer(pattern, text_lower, re.IGNORECASE | re.MULTILINE)
+                        for match in matches:
+                            if match.groups():
+                                potential_def = match.group(1).strip()
+                                if len(potential_def) > 20:
+                                    explanation = potential_def
+                                    data['explanation'] = explanation
+                                    break
+                        if explanation:
+                            break
+                
+                # Fetch pronunciation (same as single word)
+                pronunciation = self._fetch_pronunciation_from_api(word)
+                data['pronunciation'] = pronunciation
+                
+                results[word_lower] = data
+            
+            return results
+            
+        except Exception as e:
+            error_msg = str(e)
+            debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
+            if debug_enabled:
+                provider_name = self.ai_provider.get_name()
+                console.print(f"[red][DEBUG] Batch {provider_name} exception: {error_msg}[/red]")
+            
+            # Fallback: return empty results, will fall back to individual calls
+            return {}
+
+    def _generate_ai_explanation_and_examples(self, word: str, num_examples: int, is_repeat: bool = False) -> Dict[str, str]:
+        """Generate explanation and examples using AI provider (single word)."""
+        # Debug: Check which AI provider we're using
+        debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
+        if debug_enabled:
+            provider_name = self.ai_provider.get_name()
+            console.print(f"[cyan][DEBUG] Calling {provider_name} for '{word}'...[/cyan]")
         
         repeat_note = ""
         if is_repeat:
@@ -722,13 +1100,16 @@ class SentenceGenerator:
         - The definition should be clear, precise, and explain what the word means
         - Use the format: "definition text" (like "a fixed amount of a commodity officially allowed to each person during a time of shortage, as in wartime.")
         
-        - The EXAMPLE must be a REALISTIC example of how US English native speakers actually use this word in daily conversations
+        - The EXAMPLE must be a REALISTIC example of how US English native speakers actually USE this word in daily conversations
+        - CRITICAL: The word "{word}" must be USED NATURALLY in the sentence, not just mentioned or talked about
+        - The example should demonstrate the word being actively used in context - like "The poverty-stricken neighborhood needs help" NOT "She's talking about poverty-stricken"
         - The example should sound like actual dialogue from TV shows (like Friends, The Office, Breaking Bad), movies, or real everyday conversations
         - Make it sound natural and conversational - like something a real person would say in casual conversation
         - Use contractions, casual language, and natural speech patterns when appropriate
-        - The example should demonstrate the word being used naturally in context, not forced or academic
+        - The example should show the word being used as it would naturally appear in speech or writing
         - Think about how people actually talk in real life - not formal or textbook-like
-        - The sentence should sound like something you'd overhear in a coffee shop, restaurant, or between friends{repeat_note}
+        - The sentence should sound like something you'd overhear in a coffee shop, restaurant, or between friends
+        - DO NOT create examples where someone is just mentioning or discussing the word - the word must be actively used{repeat_note}
 
         Format your response exactly as follows:
 
@@ -736,7 +1117,7 @@ class SentenceGenerator:
         [Dictionary definition of "{word}"]
 
         EXAMPLES:
-        1. [One realistic conversational example showing how native speakers actually use "{word}" in daily life - make it sound like real conversation]
+        1. [One realistic conversational example where "{word}" is naturally USED in context - not just mentioned]
         """
 
         try:
@@ -926,16 +1307,47 @@ class SentenceGenerator:
             }
         except Exception as e:
             error_msg = str(e)
+            # Check if it's a quota/rate limit error - explicitly try dictionary APIs as fallback
+            is_quota_error = "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower()
+            
             # Only show warning if it's not a 404/model not found error (those are expected and handled silently)
             if "404" not in error_msg and "not found" not in error_msg.lower() and "not supported" not in error_msg.lower():
                 console.print(f"[yellow][WARN] AI generation failed for '{word}': {e}[/yellow]")
-            # Fallback to online API-based generation
+                if is_quota_error:
+                    # Explicitly inform user we're falling back to dictionary APIs
+                    console.print(f"[dim]Falling back to dictionary APIs (Oxford/Free Dictionary) for definition...[/dim]")
+            
+            # Always fallback to dictionary API-based generation when AI fails
+            # This ensures we get definitions from Oxford API or Free Dictionary API
             return self._generate_mock_explanation_and_examples(word, num_examples, is_repeat)
 
     def _generate_mock_explanation_and_examples(self, word: str, num_examples: int, is_repeat: bool = False) -> Dict[str, str]:
-        """Generate mock explanation and examples for demonstration purposes."""
-        # Always try to fetch definition from online APIs first
-        explanation = self._fetch_definition_from_api(word)
+        """Generate mock explanation and examples using dictionary APIs as fallback when AI fails.
+        
+        This is used when AI providers (Google AI, OpenAI, etc.) fail or are unavailable.
+        It tries to fetch definitions and examples from dictionary APIs (Free Dictionary API, Oxford, etc.)
+        and generates basic example sentences if needed.
+        """
+        # Try to fetch definition AND examples from Free Dictionary API first (dictionaryapi.dev)
+        definition, api_examples, source = self._try_fetch_definition_and_examples_from_free_api(word)
+        
+        # If Free Dictionary API provided definition and examples, use them
+        if definition:
+            explanation = definition
+            # Use API examples if available, otherwise generate fallback examples
+            if api_examples:
+                # Take up to num_examples from API examples
+                examples = api_examples[:num_examples]
+                # If we need more examples, generate fallback ones
+                if len(examples) < num_examples:
+                    fallback_examples = self._generate_fallback_examples(word, num_examples - len(examples), is_repeat)
+                    examples.extend(fallback_examples)
+            else:
+                examples = self._generate_fallback_examples(word, num_examples, is_repeat)
+        else:
+            # Free Dictionary API failed, try other dictionary APIs for definition only
+            explanation = self._fetch_definition_from_api(word)
+            examples = self._generate_fallback_examples(word, num_examples, is_repeat)
         
         # Only use local fallback if all APIs fail (minimal local dictionary)
         if not explanation:
@@ -948,8 +1360,65 @@ class SentenceGenerator:
             if word.lower() in minimal_fallback:
                 explanation = minimal_fallback[word.lower()]
             else:
-                # Use original word only (no base word fallback for explanations)
-                explanation = f"Unable to fetch definition for '{word}'. The word may not be in the dictionary, or there may be a network issue. Please check your internet connection or set up Google API key for better results."
+                # Try to generate a basic definition for compound/hyphenated words
+                # This is better than showing an error message
+                word_lower = word.lower()
+                
+                # Handle common compound word patterns
+                if '-' in word:
+                    parts = word_lower.split('-')
+                    # Try to understand common prefixes/suffixes
+                    if parts[0] == 'anti':
+                        base = '-'.join(parts[1:])
+                        explanation = f"Opposition to or hostility toward {base}; prejudice or discrimination against {base}."
+                    elif parts[0] == 'self':
+                        base = '-'.join(parts[1:])
+                        explanation = f"Relating to or directed toward oneself; {base} of or by oneself."
+                    elif parts[-1] == 'free':
+                        base = '-'.join(parts[:-1])
+                        explanation = f"Free from or without {base}; not containing or involving {base}."
+                    elif parts[-1] == 'proof':
+                        base = '-'.join(parts[:-1])
+                        explanation = f"Resistant to or protected against {base}; impervious to {base}."
+                    elif parts[-1] == 'friendly':
+                        base = '-'.join(parts[:-1])
+                        explanation = f"Beneficial to or compatible with {base}; not harmful to {base}."
+                    elif parts[-1] == 'related':
+                        base = '-'.join(parts[:-1])
+                        explanation = f"Connected with or concerning {base}; associated with {base}."
+                    elif parts[-1] == 'based':
+                        base = '-'.join(parts[:-1])
+                        explanation = f"Having {base} as a foundation or starting point; derived from {base}."
+                    elif len(parts) == 2:
+                        # Generic compound word pattern: "word1-word2" -> "relating to word1 and word2"
+                        explanation = f"A compound term combining '{parts[0]}' and '{parts[1]}', typically relating to both concepts."
+                    else:
+                        # Multiple parts - generic description
+                        explanation = f"A compound term combining multiple concepts: {', '.join(parts)}."
+                else:
+                    # For non-compound words, try to provide a basic definition based on common patterns
+                    # This is a last resort when all APIs fail
+                    if word_lower.endswith('ism'):
+                        base = word_lower[:-3]
+                        explanation = f"A doctrine, theory, or system of beliefs related to {base}."
+                    elif word_lower.endswith('ist'):
+                        base = word_lower[:-3] if word_lower.endswith('ist') else word_lower[:-2]
+                        explanation = f"A person who supports, practices, or is associated with {base}."
+                    elif word_lower.endswith('tion') or word_lower.endswith('sion'):
+                        base = word_lower[:-4] if word_lower.endswith('tion') else word_lower[:-4]
+                        explanation = f"The action or process of {base}ing; the state of being {base}ed."
+                    elif word_lower.endswith('ly'):
+                        base = word_lower[:-2]
+                        explanation = f"In a manner relating to {base}; characteristic of {base}."
+                    elif word_lower.endswith('ed'):
+                        base = word_lower[:-2]
+                        explanation = f"Past tense or past participle of {base}; having been {base}."
+                    elif word_lower.endswith('ing'):
+                        base = word_lower[:-3]
+                        explanation = f"Present participle of {base}; the action of {base}ing."
+                    else:
+                        # Last resort: provide a generic but helpful definition
+                        explanation = f"{word} is a vocabulary word that appears in the text. The exact definition could not be retrieved from dictionary APIs. Consider looking it up in a dictionary or using an AI provider for a detailed definition."
         
         # Conversational examples that sound like they come from TV shows or daily conversations
         conversational_examples = {
@@ -1060,6 +1529,9 @@ class SentenceGenerator:
             ],
         }
         
+        # If we already have examples from the API, return early
+        # (This code block only runs if API examples were not used above)
+        
         # Alternate examples for repeat words (different contexts)
         repeat_examples = {
             'rations': [
@@ -1080,36 +1552,8 @@ class SentenceGenerator:
             ],
         }
         
-        # Use conversational example if available
-        if word.lower() in conversational_examples:
-            import random
-            if is_repeat and word.lower() in repeat_examples:
-                # Use different examples for repeats
-                examples = random.sample(repeat_examples[word.lower()], min(num_examples, len(repeat_examples[word.lower()])))
-            else:
-                # Use regular examples
-                examples = random.sample(conversational_examples[word.lower()], min(num_examples, len(conversational_examples[word.lower()])))
-        else:
-            # Generate a more conversational example
-            if is_repeat:
-                # Different templates for repeats
-                conversational_templates = [
-                    f"Let me give you another example of {word} - this time in a different context.",
-                    f"I've seen {word} used differently - like in this situation.",
-                    f"Here's another way people use {word} in everyday conversation.",
-                    f"Another example of {word} would be in this scenario.",
-                ]
-            else:
-                conversational_templates = [
-                    f"I can't believe how {word} that situation was.",
-                    f"She's always talking about {word} - it's annoying.",
-                    f"Did you see how {word} he got?",
-                    f"That's so {word} - I've never seen anything like it.",
-                    f"He's been {word} about this for weeks now.",
-                ]
-            import random
-            random.shuffle(conversational_templates)
-            examples = conversational_templates[:num_examples]
+        # Note: examples should already be set above from API or fallback generation
+        # The old hardcoded examples below are not used anymore since we use API examples or fallback
         
         # Fetch pronunciation from online API
         pronunciation = self._fetch_pronunciation_from_api(word)
@@ -1303,6 +1747,107 @@ class SentenceGenerator:
         
         return ""
     
+    def _try_fetch_definition_and_examples_from_free_api(self, word: str, progress_callback: Optional[callable] = None) -> tuple:
+        """Fetch definition and example sentences from Free Dictionary API (dictionaryapi.dev).
+        
+        Args:
+            word: Word to fetch definition for
+            progress_callback: Optional callback to report progress
+            
+        Returns:
+            Tuple of (definition, examples, source_name) where examples is a list of example sentences
+        """
+        import urllib.request
+        import urllib.parse
+        import urllib.error
+        import json
+        import time
+        
+        # Generate word variants for hyphenated words
+        word_variants = [word.lower()]
+        if '-' in word:
+            word_variants.append(word.lower().replace('-', ''))
+        
+        # Try each word variant
+        for word_variant in word_variants:
+            for attempt in range(2):
+                try:
+                    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word_variant)}"
+                    req = urllib.request.Request(url)
+                    req.add_header('User-Agent', 'English-Learning-Helper/1.0')
+                    req.add_header('Accept', 'application/json')
+                    
+                    with urllib.request.urlopen(req, timeout=8) as response:
+                        response_data = response.read().decode()
+                        data = json.loads(response_data)
+                        
+                        if data and len(data) > 0:
+                            definition = ""
+                            examples = []
+                            
+                            # Get the first meaning
+                            meanings = data[0].get('meanings', [])
+                            if meanings and len(meanings) > 0:
+                                # Try first meaning's definitions
+                                definitions_list = meanings[0].get('definitions', [])
+                                if definitions_list and len(definitions_list) > 0:
+                                    first_def = definitions_list[0]
+                                    definition = first_def.get('definition', '').strip()
+                                    
+                                    # Get example sentences from this definition
+                                    example = first_def.get('example', '')
+                                    if example:
+                                        # Clean up the example (remove HTML tags if any, trim)
+                                        example = example.strip()
+                                        examples.append(example)
+                                    
+                                    # Also try to get examples from other definitions
+                                    for def_item in definitions_list[1:]:
+                                        example = def_item.get('example', '')
+                                        if example and example.strip():
+                                            examples.append(example.strip())
+                                
+                                # If no definition in first meaning, try other meanings
+                                if not definition:
+                                    for meaning in meanings[1:]:
+                                        definitions_list = meaning.get('definitions', [])
+                                        if definitions_list and len(definitions_list) > 0:
+                                            first_def = definitions_list[0]
+                                            definition = first_def.get('definition', '').strip()
+                                            if definition:
+                                                example = first_def.get('example', '')
+                                                if example:
+                                                    examples.append(example.strip())
+                                                break
+                            
+                            if definition:
+                                if progress_callback:
+                                    progress_callback(f"Getting definition and examples for '{word}'... (from Free Dictionary API)")
+                                return definition, examples, "Free Dictionary API"
+                        # If we got data but no definition, try next variant
+                        break
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        break  # Try next variant
+                    if e.code == 429:
+                        if attempt == 0:
+                            time.sleep(2.0)
+                            continue
+                        break
+                    if attempt == 0:
+                        time.sleep(0.5)
+                        continue
+                    break
+                except (urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError) as e:
+                    if attempt == 0:
+                        time.sleep(0.5)
+                        continue
+                    break
+                except Exception as e:
+                    break
+        
+        return "", [], "None"
+    
     def _try_fetch_definition_apis(self, word: str, progress_callback: Optional[callable] = None) -> tuple:
         """Try to fetch definition from all available APIs.
         
@@ -1312,6 +1857,8 @@ class SentenceGenerator:
         3. WordsAPI (if API key available) - Alternative source
         
         Note: Google scraping removed due to unreliability and slowness.
+        
+        For hyphenated words, tries both the original word and the word without hyphens.
         
         Returns:
             Tuple of (definition, source_name) where source_name is the API that provided the definition
@@ -1326,108 +1873,116 @@ class SentenceGenerator:
         # Reduced delay since we're using many parallel threads
         time.sleep(0.05)  # Very small delay for rate limit protection
         
+        # Generate word variants for hyphenated words (e.g., "anti-semitism" -> ["anti-semitism", "antisemitism"])
+        word_variants = [word.lower()]
+        if '-' in word:
+            word_variants.append(word.lower().replace('-', ''))
+        
         # 1. Free Dictionary API (dictionaryapi.dev) - FASTEST and most reliable free option
         # This is prioritized first because it's fast, free, and doesn't require API keys
-        # Try up to 2 times to handle transient network issues
-        for attempt in range(2):
-            try:
-                url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word.lower())}"
-                req = urllib.request.Request(url)
-                req.add_header('User-Agent', 'English-Learning-Helper/1.0')
-                req.add_header('Accept', 'application/json')
-                
-                # Reduced timeout for faster failure if API is slow
-                with urllib.request.urlopen(req, timeout=8) as response:
-                    response_data = response.read().decode()
-                    data = json.loads(response_data)
+        # Try each word variant and up to 2 times per variant to handle transient network issues
+        for word_variant in word_variants:
+            for attempt in range(2):
+                try:
+                    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word_variant)}"
+                    req = urllib.request.Request(url)
+                    req.add_header('User-Agent', 'English-Learning-Helper/1.0')
+                    req.add_header('Accept', 'application/json')
                     
-                    if data and len(data) > 0:
-                        # Get the first meaning - try multiple paths
-                        meanings = data[0].get('meanings', [])
-                        if meanings and len(meanings) > 0:
-                            # Try first meaning's definitions
-                            definitions = meanings[0].get('definitions', [])
-                            if definitions and len(definitions) > 0:
-                                definition = definitions[0].get('definition', '').strip()
-                                if definition:
-                                    if progress_callback:
-                                        progress_callback(f"Getting definition for '{word}'... (from Free Dictionary API)")
-                                    return definition, "Free Dictionary API"
-                            
-                            # If no definition in first meaning, try other meanings
-                            for meaning in meanings[1:]:
-                                definitions = meaning.get('definitions', [])
+                    # Reduced timeout for faster failure if API is slow
+                    with urllib.request.urlopen(req, timeout=8) as response:
+                        response_data = response.read().decode()
+                        data = json.loads(response_data)
+                        
+                        if data and len(data) > 0:
+                            # Get the first meaning - try multiple paths
+                            meanings = data[0].get('meanings', [])
+                            if meanings and len(meanings) > 0:
+                                # Try first meaning's definitions
+                                definitions = meanings[0].get('definitions', [])
                                 if definitions and len(definitions) > 0:
                                     definition = definitions[0].get('definition', '').strip()
                                     if definition:
                                         if progress_callback:
                                             progress_callback(f"Getting definition for '{word}'... (from Free Dictionary API)")
                                         return definition, "Free Dictionary API"
-                    # If we got data but no definition, break (don't retry)
-                    break
-            except urllib.error.HTTPError as e:
-                # 404 means word not found - don't retry
-                if e.code == 404:
-                    break
-                # 429 means rate limited - wait longer before retry
-                if e.code == 429:
+                                
+                                # If no definition in first meaning, try other meanings
+                                for meaning in meanings[1:]:
+                                    definitions = meaning.get('definitions', [])
+                                    if definitions and len(definitions) > 0:
+                                        definition = definitions[0].get('definition', '').strip()
+                                        if definition:
+                                            if progress_callback:
+                                                progress_callback(f"Getting definition for '{word}'... (from Free Dictionary API)")
+                                            return definition, "Free Dictionary API"
+                        # If we got data but no definition, try next variant
+                        break  # Break from retry loop, continue to next variant
+                except urllib.error.HTTPError as e:
+                    # 404 means word not found - try next variant
+                    if e.code == 404:
+                        break  # Break from retry loop, continue to next variant
+                    # 429 means rate limited - wait longer before retry
+                    if e.code == 429:
+                        if attempt == 0:
+                            time.sleep(2.0)  # Wait 2 seconds for rate limit
+                            continue
+                        break  # Break from retry loop, continue to next variant
+                    # Other HTTP errors - retry once with delay
                     if attempt == 0:
-                        time.sleep(2.0)  # Wait 2 seconds for rate limit
+                        time.sleep(0.5)  # Brief delay before retry
                         continue
-                    break
-                # Other HTTP errors - retry once with delay
-                if attempt == 0:
-                    time.sleep(0.5)  # Brief delay before retry
-                    continue
-                break
-            except (urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError) as e:
-                # Network or parsing errors - retry once
-                if attempt == 0:
-                    import time
-                    time.sleep(0.5)
-                    continue
-                break
-            except Exception as e:
-                # Other errors - don't retry
-                break
+                    break  # Break from retry loop, continue to next variant
+                except (urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError) as e:
+                    # Network or parsing errors - retry once
+                    if attempt == 0:
+                        time.sleep(0.5)
+                        continue
+                    break  # Break from retry loop, continue to next variant
+                except Exception as e:
+                    # Other errors - try next variant
+                    break  # Break from retry loop, continue to next variant
         
         # 2. Oxford Languages (Oxford Dictionary API) - MOST ACCURATE, requires API keys
-        # Only try if Free Dictionary API failed
+        # Only try if Free Dictionary API failed - try all word variants
         oxford_app_id = os.getenv('OXFORD_APP_ID')
         oxford_api_key = os.getenv('OXFORD_API_KEY')
         if oxford_app_id and oxford_api_key:
-            definition = self._try_fetch_oxford_definition(word, oxford_app_id, oxford_api_key)
-            if definition:
-                if progress_callback:
-                    progress_callback(f"Getting definition for '{word}'... (from Oxford Dictionary API)")
-                return definition, "Oxford Dictionary API"
+            for word_variant in word_variants:
+                definition = self._try_fetch_oxford_definition(word_variant, oxford_app_id, oxford_api_key)
+                if definition:
+                    if progress_callback:
+                        progress_callback(f"Getting definition for '{word}'... (from Oxford Dictionary API)")
+                    return definition, "Oxford Dictionary API"
         
         # 3. WordsAPI (if API key is available) - Alternative source
+        # Try all word variants
         words_api_key = os.getenv('WORDS_API_KEY')
         if words_api_key:
-            try:
-                url = f"https://wordsapiv1.p.rapidapi.com/words/{urllib.parse.quote(word.lower())}/definitions"
-                req = urllib.request.Request(url)
-                req.add_header('X-RapidAPI-Key', words_api_key)
-                req.add_header('X-RapidAPI-Host', 'wordsapiv1.p.rapidapi.com')
-                req.add_header('User-Agent', 'English-Learning-Helper/1.0')
-                
-                # Reduced timeout from 10 to 5 seconds for faster failure and better performance
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    data = json.loads(response.read().decode())
+            for word_variant in word_variants:
+                try:
+                    url = f"https://wordsapiv1.p.rapidapi.com/words/{urllib.parse.quote(word_variant)}/definitions"
+                    req = urllib.request.Request(url)
+                    req.add_header('X-RapidAPI-Key', words_api_key)
+                    req.add_header('X-RapidAPI-Host', 'wordsapiv1.p.rapidapi.com')
+                    req.add_header('User-Agent', 'English-Learning-Helper/1.0')
                     
-                    if 'definitions' in data and len(data['definitions']) > 0:
-                        definition = data['definitions'][0].get('definition', '').strip()
-                        if definition:
-                            if progress_callback:
-                                progress_callback(f"Getting definition for '{word}'... (from WordsAPI)")
-                            return definition, "WordsAPI"
-            except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError) as e:
-                # No more APIs to try
-                pass
-            except Exception as e:
-                # No more APIs to try
-                pass
+                    # Reduced timeout from 10 to 5 seconds for faster failure and better performance
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        data = json.loads(response.read().decode())
+                        
+                        if 'definitions' in data and len(data['definitions']) > 0:
+                            definition = data['definitions'][0].get('definition', '').strip()
+                            if definition:
+                                if progress_callback:
+                                    progress_callback(f"Getting definition for '{word}'... (from WordsAPI)")
+                                return definition, "WordsAPI"
+                except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError, IndexError) as e:
+                    # Try next variant
+                    continue
+                except Exception as e:
+                    # Try next variant
+                    continue
         
         # All APIs failed for this word
         return "", "None"
@@ -1754,8 +2309,10 @@ def process_vocabulary_files(
     test_batch_size: int = 20,
     words_per_section: int = 20,
     track_new_words: bool = True,
-    tracker_file: str = 'processed_words.json',
-    progress_callback: Optional[callable] = None
+    tracker_file: Optional[str] = None,
+    progress_callback: Optional[callable] = None,
+    ai_provider: Optional[str] = None,
+    use_batch_processing: bool = False
 ) -> Dict:
     """
     Shared function to process vocabulary files. Used by both CLI and GUI.
@@ -1814,6 +2371,12 @@ def process_vocabulary_files(
     if not actual_paths:
         raise ValueError("No valid files found to process.")
     
+    # Determine tracker file path: use same directory as first input file if not specified
+    if tracker_file is None:
+        first_file_path = actual_paths[0]
+        input_dir = os.path.dirname(os.path.abspath(first_file_path))
+        tracker_file = os.path.join(input_dir, "processed_words.json")
+    
     if len(actual_paths) > 1:
         emit_progress(f"Processing {len(actual_paths)} files...")
     
@@ -1856,20 +2419,19 @@ def process_vocabulary_files(
         words_to_process = new_words + duplicate_words
     
     total_words = len(words_to_process)
-    emit_progress(f"Generating explanations for {total_words} words... (from Google AI)")
     
     # Generate explanations and examples for words to process using parallel processing
-    generator = SentenceGenerator()
+    generator = SentenceGenerator(provider=ai_provider)
+    provider_name = generator.ai_provider.get_name()
+    emit_progress(f"Generating explanations for {total_words} words... (from {provider_name})")
     
-    # Debug: Check if Google AI is actually available - ALWAYS show this if in mock mode
+    # Debug: Check if AI provider is actually available - ALWAYS show this if in mock mode
     debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
     if generator.use_mock:
-        emit_progress(f"[WARNING] Google AI is in MOCK mode - definitions will come from dictionary APIs")
-        emit_progress(f"[WARNING] Check your GOOGLE_API_KEY in .env file")
+        emit_progress(f"[WARNING] {provider_name} is in MOCK mode - definitions will come from dictionary APIs")
+        emit_progress(f"[WARNING] Check your API key in .env file")
     elif debug_enabled:
-        emit_progress(f"[DEBUG] Google AI initialized: use_mock={generator.use_mock}, has_models={len(generator.models) > 0}")
-        if generator.model:
-            emit_progress(f"[DEBUG] Using model: {generator.model}")
+        emit_progress(f"[DEBUG] {provider_name} initialized: use_mock={generator.use_mock}")
     
     word_data = {}  # Store explanation and examples for each word
     duplicate_set = set(w.lower() for w in duplicate_words)  # For quick lookup
@@ -1889,16 +2451,16 @@ def process_vocabulary_files(
             if is_duplicate and tracker:
                 occurrence_count = tracker.get_occurrence_count(word)
                 # Generate with a note that this is a repeat word needing different examples
-                emit_progress(f"Processing '{word}'... (from Google AI)")
+                emit_progress(f"Processing '{word}'... (from {provider_name})")
                 if debug_enabled:
-                    emit_progress(f"[DEBUG] Calling Google AI for '{word}' (duplicate word)")
+                    emit_progress(f"[DEBUG] Calling {provider_name} for '{word}' (duplicate word)")
                 data = generator.generate_explanation_and_examples(word, examples_per_word, is_repeat=True)
                 data['is_important'] = True
                 data['occurrence_count'] = occurrence_count
             else:
-                emit_progress(f"Processing '{word}'... (from Google AI)")
+                emit_progress(f"Processing '{word}'... (from {provider_name})")
                 if debug_enabled:
-                    emit_progress(f"[DEBUG] Calling Google AI for '{word}'")
+                    emit_progress(f"[DEBUG] Calling {provider_name} for '{word}'")
                 data = generator.generate_explanation_and_examples(word, examples_per_word)
                 data['is_important'] = False
             
@@ -1984,23 +2546,96 @@ def process_vocabulary_files(
             except Exception as e2:
                 return (word, None, e2)
     
-    # Use ThreadPoolExecutor for parallel processing
-    # For I/O-bound tasks (API calls), we can use many more threads
-    # Increased from 8 to 20 for significantly faster processing
-    max_workers = min(20, total_words)  # Don't create more threads than words
-    emit_progress(f"Processing with {max_workers} parallel workers...")
+    # Batch processing for Google AI (much faster - process multiple words per API call)
+    BATCH_SIZE = 5  # Process 5 words per batch to balance speed and quality
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_word = {executor.submit(process_single_word, word): word for word in words_to_process}
+    if not generator.use_mock:
+        emit_progress(f"Processing {total_words} words in batches of {BATCH_SIZE}... (from {provider_name})")
         
-        # Collect results as they complete
-        for future in as_completed(future_to_word):
-            word, data, error = future.result()
-            if error:
-                emit_progress(f"ERROR: Critical error processing '{word}': {error}")
-            elif data:
-                word_data[word] = data
+        # Prepare word batches with metadata
+        word_batches = []
+        for i in range(0, len(words_to_process), BATCH_SIZE):
+            batch = []
+            for word in words_to_process[i:i+BATCH_SIZE]:
+                is_duplicate = word.lower() in duplicate_set
+                occurrence_count = tracker.get_occurrence_count(word) if tracker and is_duplicate else None
+                batch.append((word, is_duplicate, occurrence_count))
+            word_batches.append(batch)
+        
+        # Process batches sequentially (each batch is one API call)
+        for batch_idx, word_batch in enumerate(word_batches):
+            batch_words = [w[0] for w in word_batch]
+            emit_progress(f"Processing batch {batch_idx + 1}/{len(word_batches)}: {', '.join(batch_words[:3])}{'...' if len(batch_words) > 3 else ''}... (from {provider_name})")
+            
+            try:
+                # Extract word info for batch call
+                words_info = [(w[0], w[1]) for w in word_batch]  # (word, is_repeat)
+                
+                # Call batch processing
+                batch_results = generator._generate_ai_explanation_and_examples_batch(words_info, examples_per_word)
+                
+                # Process batch results
+                for word, is_duplicate, occurrence_count in word_batch:
+                    word_lower = word.lower()
+                    data = batch_results.get(word_lower, {})
+                    
+                    if data and data.get('explanation'):
+                        # Batch processing succeeded for this word
+                        data['is_important'] = is_duplicate
+                        if is_duplicate and occurrence_count:
+                            data['occurrence_count'] = occurrence_count
+                        
+                        # Ensure pronunciation is included
+                        if not data.get('pronunciation'):
+                            pronunciation = loader.get_pronunciation(word).strip()
+                            if pronunciation:
+                                emit_progress(f"Getting pronunciation for '{word}'... (from cache)")
+                            else:
+                                pronunciation = generator._fetch_pronunciation_from_api(word, emit_progress).strip()
+                            data['pronunciation'] = pronunciation
+                        
+                        word_data[word] = data
+                    else:
+                        # Batch processing failed for this word - mark for individual processing
+                        pass
+                
+                # Update progress
+                with progress_lock:
+                    completed_count[0] += len(word_batch)
+                    count = completed_count[0]
+                    if count % 10 == 0 or count == total_words:
+                        emit_progress(f"Processed {count}/{total_words} words")
+                        
+            except Exception as e:
+                debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
+                error_msg = str(e)
+                if debug_enabled:
+                    console.print(f"[yellow][DEBUG] Batch processing failed: {error_msg[:200]}[/yellow]")
+                # If it's a 404/model error, all words in batch will be processed individually
+                # If it's another error, still mark for individual processing
+                # Don't add words to word_data here - they'll be processed individually below
+                pass
+    
+    # Process remaining words individually (fallback for words that batch processing missed)
+    remaining_words = [w for w in words_to_process if w not in word_data]
+    if remaining_words:
+        emit_progress(f"Processing {len(remaining_words)} words individually (fallback)... (from {provider_name})")
+        
+        max_workers = min(20, len(remaining_words))
+        emit_progress(f"Processing with {max_workers} parallel workers...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_word = {executor.submit(process_single_word, word): word for word in remaining_words}
+            
+            for future in as_completed(future_to_word):
+                word, data, error = future.result()
+                if error:
+                    emit_progress(f"ERROR: Critical error processing '{word}': {error}")
+                elif data:
+                    word_data[word] = data
+    else:
+        # All words processed via batch - no individual processing needed
+        pass
     
     emit_progress(f"Generated explanations and examples for all {total_words} words")
     
@@ -2182,8 +2817,10 @@ def cli():
 @click.option('--test-batch-size', default=20, help='Number of questions per test batch')
 @click.option('--words-per-section', default=20, help='Number of words per section before test')
 @click.option('--track-new-words/--no-track', default=True, help='Track processed words and only process new ones')
-@click.option('--tracker-file', default='processed_words.json', help='File to track processed words')
-def process(file_paths: tuple, examples_per_word: int, output: Optional[str], test_batch_size: int, words_per_section: int, track_new_words: bool, tracker_file: str):
+@click.option('--tracker-file', default=None, help='File to track processed words (default: same directory as input file)')
+@click.option('--ai-provider', default='google', type=click.Choice(['google', 'openai', 'deepseek', 'anthropic'], case_sensitive=False), help='AI provider to use: google (Gemini), openai (ChatGPT), deepseek, or anthropic (Claude)')
+@click.option('--use-batch', is_flag=True, default=False, help='Enable batch processing (process multiple words per API call for faster processing)')
+def process(file_paths: tuple, examples_per_word: int, output: Optional[str], test_batch_size: int, words_per_section: int, track_new_words: bool, tracker_file: Optional[str], ai_provider: str, use_batch: bool):
     """Process one or more vocabulary files and generate explanations, examples, and tests for ALL words.
     
     You can specify multiple files:
@@ -2202,7 +2839,9 @@ def process(file_paths: tuple, examples_per_word: int, output: Optional[str], te
             words_per_section=words_per_section,
             track_new_words=track_new_words,
             tracker_file=tracker_file,
-            progress_callback=None  # CLI uses console.print directly
+            progress_callback=None,  # CLI uses console.print directly
+            ai_provider=ai_provider,
+            use_batch_processing=use_batch
         )
         
         # Display summary
@@ -2660,12 +3299,14 @@ def word(word: str, count: int):
 
 def check_new_words_and_process(
     file_paths: List[str],
-    tracker_file: str = 'processed_words.json',
+    tracker_file: Optional[str] = None,
     output: Optional[str] = None,
     examples_per_word: int = 1,
     test_batch_size: int = 20,
     words_per_section: int = 20,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[callable] = None,
+    ai_provider: Optional[str] = None,
+    use_batch_processing: bool = False
 ) -> Dict:
     """
     Shared function to check for new words and generate learning materials for them.
@@ -2724,6 +3365,12 @@ def check_new_words_and_process(
     if not actual_paths:
         raise ValueError("No valid files found to process.")
     
+    # Determine tracker file path: use same directory as first input file if not specified
+    if tracker_file is None:
+        first_file_path = actual_paths[0]
+        input_dir = os.path.dirname(os.path.abspath(first_file_path))
+        tracker_file = os.path.join(input_dir, "processed_words.json")
+    
     # Load vocabulary WITHOUT fetching pronunciations (optimization for check-new)
     loader = VocabularyLoader()
     all_words = []
@@ -2775,7 +3422,8 @@ def check_new_words_and_process(
     emit_progress(f"Found {len(new_words)} NEW words - generating learning materials...")
     emit_progress(f"Generating explanations and examples for {len(new_words)} words...")
     
-    generator = SentenceGenerator()
+    generator = SentenceGenerator(provider=ai_provider)
+    provider_name = generator.ai_provider.get_name()
     word_data = {}  # Store explanation and examples for each word
     
     # Thread-safe progress counter
@@ -2855,21 +3503,63 @@ def check_new_words_and_process(
             except Exception as e2:
                 return (word, None, e2)
     
-    # Use ThreadPoolExecutor for parallel processing
-    max_workers = min(20, len(new_words))  # Don't create more threads than words
-    emit_progress(f"Processing with {max_workers} parallel workers...")
+    # Batch processing for AI providers (much faster - process multiple words per API call)
+    BATCH_SIZE = 5  # Process 5 words per batch to balance speed and quality
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_word = {executor.submit(process_single_word, word): word for word in new_words}
+    if not generator.use_mock and use_batch_processing:
+        emit_progress(f"Processing {len(new_words)} words in batches of {BATCH_SIZE}... (from {provider_name})")
         
-        # Collect results as they complete
-        for future in as_completed(future_to_word):
-            word, data, error = future.result()
-            if error:
-                emit_progress(f"ERROR: Critical error processing '{word}': {error}")
-            elif data:
-                word_data[word] = data
+        # Prepare word batches
+        word_batches = []
+        for i in range(0, len(new_words), BATCH_SIZE):
+            batch = [(word, False, None) for word in new_words[i:i+BATCH_SIZE]]  # (word, is_duplicate, occurrence_count)
+            word_batches.append(batch)
+        
+        # Process batches sequentially (each batch is one API call)
+        for batch_idx, word_batch in enumerate(word_batches):
+            batch_words = [w[0] for w in word_batch]
+            emit_progress(f"Processing batch {batch_idx + 1}/{len(word_batches)}: {', '.join(batch_words[:3])}{'...' if len(batch_words) > 3 else ''}... (from {provider_name})")
+            
+            try:
+                words_info = [(w[0], w[1]) for w in word_batch]  # (word, is_repeat)
+                batch_results = generator._generate_ai_explanation_and_examples_batch(words_info, examples_per_word)
+                
+                for word, is_duplicate, occurrence_count in word_batch:
+                    word_lower = word.lower()
+                    data = batch_results.get(word_lower, {})
+                    
+                    if data and data.get('explanation'):
+                        data['is_important'] = False
+                        if not data.get('pronunciation'):
+                            pronunciation = generator._fetch_pronunciation_from_api(word, emit_progress).strip()
+                            data['pronunciation'] = pronunciation
+                        word_data[word] = data
+                        
+            except Exception as e:
+                debug_enabled = os.getenv('DEBUG_GOOGLE_AI', '0') == '1'
+                if debug_enabled:
+                    console.print(f"[yellow][DEBUG] Batch processing failed: {e}[/yellow]")
+                pass
+    
+    # Process remaining words individually (fallback)
+    remaining_words = [w for w in new_words if w not in word_data]
+    if remaining_words:
+        emit_progress(f"Processing {len(remaining_words)} words individually (fallback)... (from {provider_name})")
+        
+        max_workers = min(20, len(remaining_words))
+        emit_progress(f"Processing with {max_workers} parallel workers...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_word = {executor.submit(process_single_word, word): word for word in remaining_words}
+            
+            for future in as_completed(future_to_word):
+                word, data, error = future.result()
+                if error:
+                    emit_progress(f"ERROR: Critical error processing '{word}': {error}")
+                elif data:
+                    word_data[word] = data
+    else:
+        pass
     
     emit_progress(f"Generated explanations and examples for all {len(new_words)} words")
     
@@ -3072,12 +3762,14 @@ def check_new_words_and_process(
 
 @cli.command()
 @click.argument('file_path', type=click.Path())
-@click.option('--tracker-file', default='processed_words.json', help='File to track processed words')
+@click.option('--tracker-file', default=None, help='File to track processed words (default: same directory as input file)')
 @click.option('--output', default=None, help='Output filename (default: auto-generated with checknew/incremental prefix and timestamp)')
 @click.option('--examples-per-word', default=1, help='Number of example sentences per word')
 @click.option('--test-batch-size', default=20, help='Number of questions per test batch')
 @click.option('--words-per-section', default=20, help='Words per section before test')
-def check_new(file_path: str, tracker_file: str, output: Optional[str], examples_per_word: int, test_batch_size: int, words_per_section: int):
+@click.option('--ai-provider', default='google', type=click.Choice(['google', 'openai', 'deepseek', 'anthropic'], case_sensitive=False), help='AI provider to use: google (Gemini), openai (ChatGPT), deepseek, or anthropic (Claude)')
+@click.option('--use-batch', is_flag=True, default=False, help='Enable batch processing (process multiple words per API call for faster processing)')
+def check_new(file_path: str, tracker_file: Optional[str], output: Optional[str], examples_per_word: int, test_batch_size: int, words_per_section: int, ai_provider: str, use_batch: bool):
     """Check for new words in a vocabulary file and generate learning materials for them."""
     try:
         # Use shared function
@@ -3088,7 +3780,9 @@ def check_new(file_path: str, tracker_file: str, output: Optional[str], examples
             examples_per_word=examples_per_word,
             test_batch_size=test_batch_size,
             words_per_section=words_per_section,
-            progress_callback=None  # CLI uses console.print directly
+            progress_callback=None,  # CLI uses console.print directly
+            ai_provider=ai_provider,
+            use_batch_processing=use_batch
         )
         
         if result['total_words'] == 0:
@@ -3112,13 +3806,13 @@ def check_new(file_path: str, tracker_file: str, output: Optional[str], examples
         console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
 
-def clear_word_tracker(tracker_file: str = 'processed_words.json', skip_confirmation: bool = False) -> Dict:
+def clear_word_tracker(tracker_file: Optional[str] = None, skip_confirmation: bool = False) -> Dict:
     """
     Shared function to clear/reset the word tracking cache file.
     Used by both CLI and GUI.
     
     Args:
-        tracker_file: Path to the tracker file
+        tracker_file: Path to the tracker file (None = must be specified by caller)
         skip_confirmation: If True, skip confirmation (for GUI which handles its own confirmation)
     
     Returns:
@@ -3129,6 +3823,14 @@ def clear_word_tracker(tracker_file: str = 'processed_words.json', skip_confirma
             'message': str
         }
     """
+    if tracker_file is None:
+        return {
+            'success': False,
+            'words_removed': 0,
+            'tracker_file': '',
+            'message': "Tracker file path must be specified"
+        }
+    
     if not os.path.exists(tracker_file):
         return {
             'success': False,
@@ -3152,10 +3854,15 @@ def clear_word_tracker(tracker_file: str = 'processed_words.json', skip_confirma
 
 
 @cli.command()
-@click.option('--tracker-file', default='processed_words.json', help='File to track processed words')
+@click.option('--tracker-file', default=None, help='File to track processed words (default: same directory as input file)')
 @click.option('--confirm', is_flag=True, help='Skip confirmation prompt')
-def clear_tracker(tracker_file: str, confirm: bool):
+def clear_tracker(tracker_file: Optional[str], confirm: bool):
     """Clear/reset the word tracking cache file."""
+    if tracker_file is None:
+        console.print("[red]Error: --tracker-file is required. Specify the path to the tracker file.[/red]")
+        console.print("[yellow]Example: python english_learner.py clear-tracker --tracker-file C:\\Users\\Admin\\Documents\\processed_words.json[/yellow]")
+        return
+    
     if not os.path.exists(tracker_file):
         console.print(f"[yellow]Tracker file '{tracker_file}' does not exist. Nothing to clear.[/yellow]")
         return
